@@ -4,6 +4,7 @@ import ipaddress
 import json
 import math
 import os
+import random
 import re
 import signal
 import socket
@@ -17,7 +18,7 @@ from typing import Dict, Optional
 from ipwhois import IPWhois
 from psycopg import connect
 from psycopg.errors import Error as PsycopgError
-from scapy.all import IP, IPv6, Raw, TCP, UDP, get_if_list, sniff
+from scapy.all import IP, IPv6, Raw, TCP, UDP, get_if_list, send, sniff
 
 
 INTERFACE = os.getenv("INTERFACE", "auto")
@@ -58,6 +59,39 @@ HTTP_HOST_RE = re.compile(rb"^Host:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECASE)
 HTTP_UA_RE = re.compile(rb"^User-Agent:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECASE)
 HTTP_REFERER_RE = re.compile(rb"^Referer:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECASE)
 HTTP_CONTENT_TYPE_RE = re.compile(rb"^Content-Type:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECASE)
+
+HTTP_200_RESPONSE = (
+    b"HTTP/1.1 200 OK\r\n"
+    b"Content-Type: text/html; charset=utf-8\r\n"
+    b"Content-Length: 0\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+)
+
+SERVICE_BANNERS: dict[str, bytes] = {
+    "ssh": b"SSH-2.0-OpenSSH_8.9p1 Debian-3\r\n",
+    "ssh-alt": b"SSH-2.0-OpenSSH_8.9p1 Debian-3\r\n",
+    "ftp": b"220 Service ready\r\n",
+    "smtp": b"220 mail.local ESMTP ready\r\n",
+    "submission": b"220 mail.local ESMTP ready\r\n",
+    "pop3": b"+OK POP3 server ready\r\n",
+    "imap": b"* OK IMAP4 ready\r\n",
+    "telnet": b"Debian GNU/Linux 12\r\nlogin: ",
+    "redis": b"-NOAUTH Authentication required.\r\n",
+    "memcached": b"ERROR\r\n",
+    "mongodb": b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+}
+
+BANNER_FIRST_SERVICES = {
+    "ssh",
+    "ssh-alt",
+    "ftp",
+    "smtp",
+    "submission",
+    "pop3",
+    "imap",
+    "telnet",
+}
 
 COMMON_ATTACK_PORTS = {
     21: "ftp",
@@ -520,6 +554,7 @@ class IntelCollector:
 
         self.rdns_cache: Dict[str, str] = {}
         self.rdap_cache: Dict[str, Dict[str, str]] = {}
+        self._tcp_sessions: Dict[tuple[str, str, str, str], Dict[str, int | bool]] = {}
         self.pg_conn = None
         self.pg_cursor = None
         self._exempt_networks = self._load_exempt_networks()
@@ -741,6 +776,111 @@ class IntelCollector:
             or ip_obj.is_reserved
             or ip_obj.is_multicast
         )
+
+    def _tcp_session_key(self, rec: IntelRecord) -> tuple[str, str, str, str]:
+        return (rec.src_ip, rec.src_port, rec.dst_ip, rec.dst_port)
+
+    def _tcp_ack_value(self, tcp_layer, payload_len: int) -> int:
+        flags = str(tcp_layer.flags)
+        ack_value = int(tcp_layer.seq) + payload_len
+        if "S" in flags:
+            ack_value += 1
+        if "F" in flags:
+            ack_value += 1
+        return ack_value
+
+    def _service_reply_payload(self, service_guess: str, payload: bytes) -> bytes:
+        normalized = service_guess or ""
+        if HTTP_REQUEST_RE.search(payload):
+            return HTTP_200_RESPONSE
+        banner = SERVICE_BANNERS.get(normalized)
+        if banner:
+            return banner
+        return HTTP_200_RESPONSE
+
+    def _reply_to_packet(self, pkt, rec: IntelRecord):
+        if rec.transport != "TCP" or TCP not in pkt:
+            return
+        if self._is_local_ip(rec.src_ip) or self._is_local_ip(rec.dst_ip):
+            return
+        if self._self_ip and rec.src_ip == self._self_ip:
+            return
+        if self._is_exempt(rec.src_ip) or self._is_exempt(rec.dst_ip):
+            return
+
+        tcp_layer = pkt[TCP]
+        flags = str(tcp_layer.flags)
+        key = self._tcp_session_key(rec)
+
+        if "R" in flags:
+            self._tcp_sessions.pop(key, None)
+            return
+        if len(self._tcp_sessions) > 10000:
+            self._tcp_sessions.clear()
+
+        if IP in pkt:
+            network_layer = IP(src=rec.dst_ip, dst=rec.src_ip)
+        elif IPv6 in pkt:
+            network_layer = IPv6(src=rec.dst_ip, dst=rec.src_ip)
+        else:
+            return
+
+        payload_len = len(rec.payload)
+        if "S" in flags and "A" not in flags:
+            server_seq = random.randint(0, (1 << 32) - 1)
+            self._tcp_sessions[key] = {
+                "server_seq": server_seq + 1,
+                "responded": False,
+            }
+            syn_ack = TCP(
+                sport=int(rec.dst_port),
+                dport=int(rec.src_port),
+                flags="SA",
+                seq=server_seq,
+                ack=int(tcp_layer.seq) + 1,
+            )
+            send(network_layer / syn_ack, verbose=False)
+            return
+
+        session = self._tcp_sessions.get(key)
+        if session is None:
+            session = {
+                "server_seq": random.randint(0, (1 << 32) - 1),
+                "responded": False,
+            }
+            self._tcp_sessions[key] = session
+
+        if session["responded"]:
+            if "F" in flags or "R" in flags:
+                self._tcp_sessions.pop(key, None)
+            return
+
+        service_guess = self._service_guess(rec.dst_port, rec.src_port, rec.payload)
+        should_reply = payload_len > 0 or service_guess in BANNER_FIRST_SERVICES or "A" in flags
+        if not should_reply:
+            return
+
+        reply_payload = self._service_reply_payload(service_guess, rec.payload)
+        reply = TCP(
+            sport=int(rec.dst_port),
+            dport=int(rec.src_port),
+            flags="PA",
+            seq=int(session["server_seq"]),
+            ack=self._tcp_ack_value(tcp_layer, payload_len),
+        )
+        send(network_layer / reply / Raw(load=reply_payload), verbose=False)
+        session["server_seq"] = int(session["server_seq"]) + len(reply_payload)
+        session["responded"] = True
+        if "F" in flags or service_guess not in BANNER_FIRST_SERVICES:
+            fin = TCP(
+                sport=int(rec.dst_port),
+                dport=int(rec.src_port),
+                flags="FA",
+                seq=int(session["server_seq"]),
+                ack=self._tcp_ack_value(tcp_layer, payload_len),
+            )
+            send(network_layer / fin, verbose=False)
+            self._tcp_sessions.pop(key, None)
 
     def _write_postgres(self, row: Dict[str, str]):
         if self.pg_cursor is None:
@@ -1109,6 +1249,7 @@ def main():
             return
         rec = packet_to_record(pkt)
         if rec is not None:
+            collector._reply_to_packet(pkt, rec)
             collector.write_record(rec)
 
     print(
