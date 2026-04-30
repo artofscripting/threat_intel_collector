@@ -355,7 +355,10 @@ ATTACK_SIGNATURES: list[tuple[str, re.Pattern]] = [
 ]
 
 FIELDNAMES = [
+    "event_key",
+    "hit_count",
     "timestamp_utc",
+    "last_seen_utc",
     "src_ip",
     "dst_ip",
     "src_port",
@@ -456,7 +459,10 @@ class IntelCollector:
                 CREATE TABLE IF NOT EXISTS {POSTGRES_TABLE} (
                     id BIGSERIAL PRIMARY KEY,
                     source_name TEXT,
+                    event_key TEXT UNIQUE,
+                    hit_count BIGINT DEFAULT 1,
                     timestamp_utc TIMESTAMPTZ,
+                    last_seen_utc TIMESTAMPTZ,
                     src_ip TEXT,
                     dst_ip TEXT,
                     src_port TEXT,
@@ -492,6 +498,18 @@ class IntelCollector:
             )
             self.pg_cursor.execute(
                 f"ALTER TABLE {POSTGRES_TABLE} ADD COLUMN IF NOT EXISTS attack_tags TEXT"
+            )
+            self.pg_cursor.execute(
+                f"ALTER TABLE {POSTGRES_TABLE} ADD COLUMN IF NOT EXISTS event_key TEXT"
+            )
+            self.pg_cursor.execute(
+                f"ALTER TABLE {POSTGRES_TABLE} ADD COLUMN IF NOT EXISTS hit_count BIGINT DEFAULT 1"
+            )
+            self.pg_cursor.execute(
+                f"ALTER TABLE {POSTGRES_TABLE} ADD COLUMN IF NOT EXISTS last_seen_utc TIMESTAMPTZ"
+            )
+            self.pg_cursor.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{POSTGRES_TABLE}_event_key ON {POSTGRES_TABLE}(event_key)"
             )
             print(
                 f"[*] PostgreSQL enabled, writing to table '{POSTGRES_TABLE}'",
@@ -601,14 +619,16 @@ class IntelCollector:
             self.pg_cursor.execute(
                 f"""
                 INSERT INTO {POSTGRES_TABLE} (
-                    source_name, timestamp_utc, src_ip, dst_ip, src_port, dst_port, transport,
+                    source_name, event_key, hit_count, timestamp_utc, last_seen_utc,
+                    src_ip, dst_ip, src_port, dst_port, transport,
                     ip_proto, packet_len, ttl_hoplimit, tcp_flags, service_guess,
                     is_scan_like, ioc_ips, ioc_domains, ioc_urls, ioc_hashes,
                     ioc_cves, payload_sha256, payload_b64, rdns, is_private,
                     is_reserved, is_multicast, country, asn, asn_description,
                     whois_network, attack_tags
                 ) VALUES (
-                    %(source_name)s, %(timestamp_utc)s, %(src_ip)s, %(dst_ip)s, %(src_port)s,
+                    %(source_name)s, %(event_key)s, %(hit_count)s, %(timestamp_utc)s, %(last_seen_utc)s,
+                    %(src_ip)s, %(dst_ip)s, %(src_port)s,
                     %(dst_port)s, %(transport)s, %(ip_proto)s, %(packet_len)s,
                     %(ttl_hoplimit)s, %(tcp_flags)s, %(service_guess)s,
                     %(is_scan_like_bool)s, %(ioc_ips)s, %(ioc_domains)s,
@@ -618,6 +638,23 @@ class IntelCollector:
                     %(is_multicast_bool)s, %(country)s, %(asn)s,
                     %(asn_description)s, %(whois_network)s, %(attack_tags)s
                 )
+                ON CONFLICT (event_key)
+                DO UPDATE SET
+                    hit_count = {POSTGRES_TABLE}.hit_count + 1,
+                    last_seen_utc = EXCLUDED.last_seen_utc,
+                    src_ip = EXCLUDED.src_ip,
+                    src_port = EXCLUDED.src_port,
+                    packet_len = EXCLUDED.packet_len,
+                    ttl_hoplimit = EXCLUDED.ttl_hoplimit,
+                    tcp_flags = EXCLUDED.tcp_flags,
+                    rdns = EXCLUDED.rdns,
+                    is_private = EXCLUDED.is_private,
+                    is_reserved = EXCLUDED.is_reserved,
+                    is_multicast = EXCLUDED.is_multicast,
+                    country = EXCLUDED.country,
+                    asn = EXCLUDED.asn,
+                    asn_description = EXCLUDED.asn_description,
+                    whois_network = EXCLUDED.whois_network
                 """,
                 {
                     **row,
@@ -731,6 +768,25 @@ class IntelCollector:
             return "true"
         return "false"
 
+    def _event_key(self, rec: IntelRecord, payload_sha256: str, service_guess: str, attack_tags: str, ioc_info: Dict[str, str]) -> str:
+        # Exclude source IP to collapse distributed flood traffic into one grouped event.
+        key_parts = [
+            rec.dst_ip,
+            rec.dst_port,
+            rec.transport,
+            rec.ip_proto,
+            rec.tcp_flags,
+            service_guess,
+            attack_tags,
+            payload_sha256,
+            ioc_info.get("ioc_urls", ""),
+            ioc_info.get("ioc_domains", ""),
+            ioc_info.get("ioc_hashes", ""),
+            ioc_info.get("ioc_cves", ""),
+        ]
+        raw = "|".join(key_parts)
+        return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
     def write_record(self, rec: IntelRecord):
         if self._is_local_ip(rec.src_ip) or self._is_local_ip(rec.dst_ip):
             return
@@ -751,9 +807,18 @@ class IntelCollector:
         if self._is_exempt_asn(rdap["asn"]):
             return
 
+        now_iso = datetime.now(timezone.utc).isoformat()
+        service_guess = self._service_guess(rec.dst_port, rec.src_port, rec.payload)
+        payload_sha256 = hashlib.sha256(rec.payload).hexdigest() if rec.payload else ""
+        attack_tags = self._detect_attack_type(rec.payload)
+        event_key = self._event_key(rec, payload_sha256, service_guess, attack_tags, ioc_info)
+
         row = {
             "source_name": SOURCE_NAME,
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "event_key": event_key,
+            "hit_count": 1,
+            "timestamp_utc": now_iso,
+            "last_seen_utc": now_iso,
             "src_ip": rec.src_ip,
             "dst_ip": rec.dst_ip,
             "src_port": rec.src_port,
@@ -763,9 +828,9 @@ class IntelCollector:
             "packet_len": rec.packet_len,
             "ttl_hoplimit": rec.ttl_hoplimit,
             "tcp_flags": rec.tcp_flags,
-            "service_guess": self._service_guess(rec.dst_port, rec.src_port, rec.payload),
+            "service_guess": service_guess,
             "is_scan_like": self._is_scan_like(rec.transport, rec.tcp_flags, len(rec.payload)),
-            "payload_sha256": hashlib.sha256(rec.payload).hexdigest() if rec.payload else "",
+            "payload_sha256": payload_sha256,
             "payload_b64": "encrypted" if self._is_encrypted_payload(rec.payload) else (base64.b64encode(rec.payload).decode("ascii") if rec.payload else ""),
             "rdns": rdns,
             "is_private": str(src_ip_obj.is_private).lower(),
@@ -775,7 +840,7 @@ class IntelCollector:
             "asn": rdap["asn"],
             "asn_description": rdap["asn_description"],
             "whois_network": rdap["whois_network"],
-            "attack_tags": self._detect_attack_type(rec.payload),
+            "attack_tags": attack_tags,
         }
         row.update(ioc_info)
 
