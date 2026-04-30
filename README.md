@@ -1,53 +1,94 @@
-# Threat Intel Listener (Docker)
+# Threat Intel Collector
 
-This container captures inbound and outbound packets, writes threat-intel-style telemetry to CSV, and can mirror each event into PostgreSQL.
+Dockerized network listener that captures visible traffic, extracts IOC-style fields, and writes events into PostgreSQL.
 
-## What it collects
+Current behavior:
+- PostgreSQL is the only output sink (CSV output is disabled).
+- Traffic with local/private addresses is excluded from inserts.
+- A startup PostgreSQL self-test is logged immediately.
 
-- Source/destination IP and ports
-- Transport and IP protocol numbers (TCP/UDP/other)
-- Packet size, TTL/HopLimit, TCP flags
-- Payload hash (`sha256`) and Base64 payload (truncated by `PAYLOAD_MAX_BYTES`)
-- Simple IOC extraction from payload:
-  - URLs
-  - IPs
-  - Domains
-  - CVE IDs
-  - Hash-like strings (MD5/SHA1/SHA256)
-- Reverse DNS (optional)
-- RDAP/ASN enrichment for public source IPs (optional)
-- Basic scan-likeness flag (for SYN-only/empty probes)
-- Optional PostgreSQL insert for each captured event
+## Complete Install And Run (GitHub -> .env -> Build -> Compose Start)
 
-## Files
-
-- `collector.py`: packet capture + enrichment + CSV writer
-- `docker-compose.yml`: easiest run option
-- `Dockerfile`: image build
-- Output CSV: `./data/threat_intel.csv`
-
-## Run
+1. Clone the repository.
 
 ```bash
-docker compose up --build -d
+git clone https://github.com/artofscripting/threat_intel_collector.git
+cd threat_intel_collector
 ```
 
-## Ubuntu install script
-
-Use the interactive installer to install Docker/Compose (if needed), prompt for config (including source name), write `.env`, and start the service:
+2. Create your environment file from the template.
 
 ```bash
-chmod +x ./install_ubuntu.sh
-./install_ubuntu.sh
+cp .env.example .env
 ```
 
-The compose file reads [.env](.env) for database secrets.
-
-Tail logs:
+3. Edit `.env` and set your values.
 
 ```bash
-docker compose logs -f
+nano .env
 ```
+
+Minimum required field:
+
+```dotenv
+HONEY_POSTGRES_PASSWORD=your_real_password_here
+```
+
+Recommended fields to set:
+
+```dotenv
+SOURCE_NAME=honeypot-1
+INTERFACE=auto
+BPF_FILTER=
+ENABLE_RDNS=false
+ENABLE_RDAP=true
+PAYLOAD_MAX_BYTES=1024
+FLUSH_INTERVAL=1
+POSTGRES_HOST=switchyard.proxy.rlwy.net
+POSTGRES_PORT=13718
+POSTGRES_DB=railway
+POSTGRES_USER=postgres
+POSTGRES_TABLE=threat_intel_events
+```
+
+4. Build the Docker image.
+
+```bash
+docker build -t threat-intel-listener .
+```
+
+5. Start with Docker Compose.
+
+```bash
+docker compose up -d --build
+```
+
+6. Verify startup and PostgreSQL connectivity.
+
+```bash
+docker logs threat-intel-listener
+```
+
+You should see lines similar to:
+- `[*] PostgreSQL self-test OK: ...`
+- `[*] PostgreSQL enabled, writing to table ...`
+
+7. Check service status.
+
+```bash
+docker compose ps
+```
+
+## Pull Updates From GitHub
+
+From inside the repo directory:
+
+```bash
+git pull origin main
+docker compose up -d --build
+```
+
+## Stop / Restart
 
 Stop:
 
@@ -55,78 +96,55 @@ Stop:
 docker compose down
 ```
 
-## Empty the PostgreSQL table
+Restart with rebuild:
 
-Run this from the project folder:
+```bash
+docker compose up -d --build
+```
+
+## Ubuntu One-Step Installer
+
+For interactive setup on Ubuntu (installs Docker/Compose if needed, prompts for values including source name, writes `.env`, and starts service):
+
+```bash
+chmod +x ./install_ubuntu.sh
+./install_ubuntu.sh
+```
+
+## Empty PostgreSQL Table
+
+PowerShell helper:
 
 ```powershell
 pwsh ./empty_table.ps1
 ```
 
-Optional dry run:
+Dry run:
 
 ```powershell
 pwsh ./empty_table.ps1 -DryRun
 ```
 
-## CSV output fields
+## Configuration Reference
 
-- `timestamp_utc`
-- `src_ip`, `dst_ip`
-- `src_port`, `dst_port`
-- `transport`, `ip_proto`
-- `packet_len`, `ttl_hoplimit`, `tcp_flags`
-- `service_guess`, `is_scan_like`
-- `ioc_ips`, `ioc_domains`, `ioc_urls`, `ioc_hashes`, `ioc_cves`
-- `payload_sha256`, `payload_b64`
-- `rdns`
-- `is_private`, `is_reserved`, `is_multicast`
-- `country`, `asn`, `asn_description`, `whois_network`
-
-## Environment variables
-
-- `CSV_FILE` (default `/data/threat_intel.csv`)
-- `INTERFACE` (default `auto`; prefers `any` if available, else first non-loopback)
-- `BPF_FILTER` (default empty; example: `tcp or udp`)
-- `ENABLE_RDNS` (`false` by default)
-- `ENABLE_RDAP` (`true` by default)
-- `PAYLOAD_MAX_BYTES` (`1024` by default)
-- `FLUSH_INTERVAL` (`1` by default)
-- `POSTGRES_DSN` (optional explicit DSN; if unset, app builds DSN from vars below)
+The compose file reads `.env` via `env_file` and maps these runtime variables:
+- `SOURCE_NAME`
+- `INTERFACE`
+- `BPF_FILTER`
+- `ENABLE_RDNS`
+- `ENABLE_RDAP`
+- `PAYLOAD_MAX_BYTES`
+- `FLUSH_INTERVAL`
 - `POSTGRES_HOST`
 - `POSTGRES_PORT`
 - `POSTGRES_DB`
 - `POSTGRES_USER`
-- `POSTGRES_PASSWORD` (from [.env](.env))
-- `POSTGRES_TABLE` (`threat_intel_events` by default)
+- `HONEY_POSTGRES_PASSWORD`
+- `POSTGRES_TABLE`
 
-## PostgreSQL configuration
+## Notes
 
-Set password in [.env](.env):
-
-```env
-HONEY_POSTGRES_PASSWORD=postgress
-```
-
-By default, compose passes host/port/db/user and the app builds:
-
-```text
-postgresql://postgres:${POSTGRES_PASSWORD}@switchyard.proxy.rlwy.net:13718/railway
-```
-
-## Notes and limitations
-
-- Capturing "all protocols" in practice means all IP traffic visible on the selected interface. The script records protocol numbers even when not TCP/UDP.
-- Deep application decoding (full HTTP parser, DNS parser, TLS fingerprinting, etc.) is intentionally not included to keep this lightweight.
-- `network_mode: host` is best on Linux hosts. On Docker Desktop for Windows/macOS, host networking and packet visibility can be limited.
-- Running with `privileged`/`NET_RAW`/`NET_ADMIN` is required for packet sniffing in most environments.
-
-## Optional filter examples
-
-Set in `docker-compose.yml` environment:
-
-- Capture only inbound internet scans to common ports:
-  - `BPF_FILTER: "tcp[tcpflags] & tcp-syn != 0 and (dst port 22 or dst port 23 or dst port 3389 or dst port 445)"`
-- Capture DNS + HTTP/S:
-  - `BPF_FILTER: "port 53 or port 80 or port 443"`
+- Host networking with raw packet capture works best on Linux hosts.
+- Container runs with `privileged`, `NET_ADMIN`, and `NET_RAW` to enable sniffing.
+- "All protocols" means all IP traffic visible on the selected interface; deep app-layer parsing is intentionally lightweight.
 
