@@ -26,3 +26,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${HONEY_POSTGRES_PASSWORD}
       POSTGRES_TABLE: ${POSTGRES_TABLE:-threat_intel_events}
+      EXEMPT_IPS_FILE: /app/exempt_ips.txt
+    volumes:
+      - ./exempt_ips.txt:/app/exempt_ips.txt:ro

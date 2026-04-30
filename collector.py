@@ -31,6 +31,7 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 SOURCE_NAME = os.getenv("SOURCE_NAME", "default")
+EXEMPT_IPS_FILE = os.getenv("EXEMPT_IPS_FILE", "/app/exempt_ips.txt")
 
 URL_RE = re.compile(rb"https?://[^\s\"'<>]+", re.IGNORECASE)
 IP_RE = re.compile(rb"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -139,6 +140,7 @@ class IntelCollector:
         self.rdap_cache: Dict[str, Dict[str, str]] = {}
         self.pg_conn = None
         self.pg_cursor = None
+        self._exempt_networks = self._load_exempt_networks()
 
         if self._effective_postgres_dsn():
             self._init_postgres()
@@ -221,6 +223,29 @@ class IntelCollector:
 
     def _safe_bool(self, value: str) -> bool:
         return str(value).lower() == "true"
+
+    def _load_exempt_networks(self) -> list:
+        networks = []
+        if not EXEMPT_IPS_FILE or not os.path.isfile(EXEMPT_IPS_FILE):
+            return networks
+        with open(EXEMPT_IPS_FILE, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    networks.append(ipaddress.ip_network(line, strict=False))
+                except ValueError:
+                    print(f"[!] Skipping invalid exempt entry: {line!r}", flush=True)
+        print(f"[*] Loaded {len(networks)} exempt network(s) from {EXEMPT_IPS_FILE}", flush=True)
+        return networks
+
+    def _is_exempt(self, ip_str: str) -> bool:
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False
+        return any(ip_obj in net for net in self._exempt_networks)
 
     def _is_local_ip(self, ip_str: str) -> bool:
         ip_obj = ipaddress.ip_address(ip_str)
@@ -352,6 +377,8 @@ class IntelCollector:
 
     def write_record(self, rec: IntelRecord):
         if self._is_local_ip(rec.src_ip) or self._is_local_ip(rec.dst_ip):
+            return
+        if self._is_exempt(rec.src_ip) or self._is_exempt(rec.dst_ip):
             return
 
         src_ip_obj = ipaddress.ip_address(rec.src_ip)
