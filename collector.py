@@ -711,6 +711,26 @@ class IntelCollector:
             self.pg_cursor = None
             self.pg_conn = None
 
+    def _reset_postgres(self):
+        if self.pg_cursor is not None:
+            try:
+                self.pg_cursor.close()
+            except Exception:
+                pass
+        if self.pg_conn is not None:
+            try:
+                self.pg_conn.close()
+            except Exception:
+                pass
+        self.pg_cursor = None
+        self.pg_conn = None
+
+    def _ensure_postgres_ready(self) -> bool:
+        if self.pg_cursor is not None and self.pg_conn is not None:
+            return True
+        self._init_postgres()
+        return self.pg_cursor is not None and self.pg_conn is not None
+
     def close(self):
         for listener in self._listener_sockets:
             try:
@@ -718,10 +738,7 @@ class IntelCollector:
             except OSError:
                 pass
         self._listener_sockets.clear()
-        if self.pg_cursor is not None:
-            self.pg_cursor.close()
-        if self.pg_conn is not None:
-            self.pg_conn.close()
+        self._reset_postgres()
 
     def _safe_bool(self, value: str) -> bool:
         return str(value).lower() == "true"
@@ -1083,12 +1100,10 @@ class IntelCollector:
             self._tcp_sessions.pop(key, None)
 
     def _write_postgres(self, row: Dict[str, str]):
-        if self.pg_cursor is None:
+        if not self._ensure_postgres_ready():
             return
 
-        try:
-            self.pg_cursor.execute(
-                f"""
+        query = f"""
                 INSERT INTO {POSTGRES_TABLE} (
                     source_name, event_key, hit_count, timestamp_utc, last_seen_utc,
                     src_ip, dst_ip, src_port, dst_port, transport,
@@ -1130,17 +1145,29 @@ class IntelCollector:
                     asn = EXCLUDED.asn,
                     asn_description = EXCLUDED.asn_description,
                     whois_network = EXCLUDED.whois_network
-                """,
-                {
-                    **row,
-                    "is_scan_like_bool": self._safe_bool(row["is_scan_like"]),
-                    "is_private_bool": self._safe_bool(row["is_private"]),
-                    "is_reserved_bool": self._safe_bool(row["is_reserved"]),
-                    "is_multicast_bool": self._safe_bool(row["is_multicast"]),
-                },
-            )
-        except PsycopgError as exc:
-            print(f"[!] PostgreSQL insert failed: {exc}", flush=True)
+                """
+        params = {
+            **row,
+            "is_scan_like_bool": self._safe_bool(row["is_scan_like"]),
+            "is_private_bool": self._safe_bool(row["is_private"]),
+            "is_reserved_bool": self._safe_bool(row["is_reserved"]),
+            "is_multicast_bool": self._safe_bool(row["is_multicast"]),
+        }
+
+        for attempt in range(2):
+            try:
+                if self.pg_cursor is None:
+                    return
+                self.pg_cursor.execute(query, params)
+                return
+            except PsycopgError as exc:
+                if attempt == 0:
+                    print(f"[!] PostgreSQL insert failed: {exc} (attempting reconnect)", flush=True)
+                    self._reset_postgres()
+                    if self._ensure_postgres_ready():
+                        continue
+                print(f"[!] PostgreSQL insert failed: {exc}", flush=True)
+                return
 
     def _extract_iocs(self, payload: bytes):
         urls = sorted({m.decode("utf-8", errors="ignore") for m in URL_RE.findall(payload)})
