@@ -137,23 +137,67 @@ COMMON_ATTACK_PORTS = {
 
 # Application-layer banner signatures for service identification
 BANNER_SIGNATURES: list[tuple[str, re.Pattern]] = [
-    ("ssh",       re.compile(rb"^SSH-\d+\.\d+-", re.MULTILINE)),
-    ("http",      re.compile(rb"^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT)\s+\S+\s+HTTP/", re.MULTILINE)),
-    ("http",      re.compile(rb"^HTTP/[12]\.", re.MULTILINE)),
-    ("ftp",       re.compile(rb"^220[\s-].*ftp", re.MULTILINE | re.IGNORECASE)),
-    ("smtp",      re.compile(rb"^220[\s-].*smtp|^EHLO\b|^MAIL FROM:", re.MULTILINE | re.IGNORECASE)),
-    ("pop3",      re.compile(rb"^\+OK\s", re.MULTILINE)),
-    ("imap",      re.compile(rb"^\*\s+OK\s", re.MULTILINE)),
-    ("rdp",       re.compile(rb"^\x03\x00\x00")),
-    ("redis",     re.compile(rb"^\*\d+\r\n\$\d+\r\n", re.MULTILINE)),
-    ("mysql",     re.compile(rb"[\x00-\xff]{3}\x00\x0a[0-9]+\.")),
-    ("smb",       re.compile(rb"\xffSMB|\xfeSMB")),
-    ("telnet",    re.compile(rb"\xff[\xfb-\xfe].")),
-    ("sip",       re.compile(rb"^(INVITE|REGISTER|OPTIONS|BYE|CANCEL)\s+sip:", re.MULTILINE | re.IGNORECASE)),
-    ("memcached", re.compile(rb"^(get|set|delete|stats|version|flush_all)\s", re.MULTILINE)),
-    ("mongodb",   re.compile(rb"\xd4\x07\x00\x00|\xdc\x07\x00\x00")),
-    ("dns",       re.compile(rb"[\x00-\xff]{2}[\x81\x84][\x00\x80]")),
-    ("ldap",      re.compile(rb"^\x30[\x00-\xff]{1,3}\x02[\x01-\x04][\x00-\xff]\x60")),
+    # ── Secure Shell ───────────────────────────────────────────────────────
+    ("ssh",           re.compile(rb"^SSH-\d+\.\d+-", re.MULTILINE)),
+    # ── HTTP / HTTP2 ───────────────────────────────────────────────────────
+    ("http",          re.compile(rb"^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT|TRACE)\s+\S+\s+HTTP/", re.MULTILINE)),
+    ("http",          re.compile(rb"^HTTP/[12]\.", re.MULTILINE)),
+    ("http2",         re.compile(rb"^PRI \* HTTP/2\.0\r\n\r\nSM\r\n\r\n")),
+    ("websocket",     re.compile(rb"Upgrade:\s*websocket", re.IGNORECASE)),
+    # ── Mail protocols ─────────────────────────────────────────────────────
+    ("ftp",           re.compile(rb"^220[\s-].*ftp", re.MULTILINE | re.IGNORECASE)),
+    ("smtp",          re.compile(rb"^220[\s-].*smtp|^EHLO\b|^HELO\b|^MAIL FROM:", re.MULTILINE | re.IGNORECASE)),
+    ("pop3",          re.compile(rb"^\+OK\s", re.MULTILINE)),
+    ("imap",          re.compile(rb"^\*\s+OK\s", re.MULTILINE)),
+    ("nntp",          re.compile(rb"^20[01]\s", re.MULTILINE)),
+    # ── Remote desktop / VNC ───────────────────────────────────────────────
+    ("rdp",           re.compile(rb"^\x03\x00\x00")),
+    ("vnc",           re.compile(rb"^RFB \d{3}\.\d{3}\r\n")),
+    # ── Key-value / caching stores ─────────────────────────────────────────
+    ("redis",         re.compile(rb"^\*\d+\r\n\$\d+\r\n", re.MULTILINE)),
+    ("memcached",     re.compile(rb"^(get|set|delete|stats|version|flush_all)\s", re.MULTILINE)),
+    # ── Relational databases ───────────────────────────────────────────────
+    ("mysql",         re.compile(rb"[\x00-\xff]{3}\x00\x0a[0-9]+\.")),
+    ("postgres",      re.compile(rb"^\x00\x00\x00[\x08-\xff]\x00\x03\x00\x00")),   # startup packet proto 3.0
+    ("postgres",      re.compile(rb"^\x00\x00\x00\x08\x04\xd2\x16/")),              # SSL request magic
+    ("mssql",         re.compile(rb"^\x12\x01\x00[\x00-\xff]{2}\x00\x00\x00")),    # TDS pre-login
+    ("oracle-tns",    re.compile(rb"^\x00[\x00-\xff]\x00\x00\x01\x00\x00\x00")),   # TNS connect
+    # ── NoSQL / big-data stores ────────────────────────────────────────────
+    ("mongodb",       re.compile(rb"\xd4\x07\x00\x00|\xdc\x07\x00\x00")),
+    ("cassandra-cql", re.compile(rb"^\x04[\x00-\xff]\x00\x00\x05")),               # CQL native OPTIONS
+    ("zookeeper",     re.compile(rb"^(ruok|stat|mntr|dump|envi|conf|cons|wchs|wchp|wchc|dirs|isro)\n", re.MULTILINE)),
+    # ── Messaging / streaming ──────────────────────────────────────────────
+    ("amqp",          re.compile(rb"^AMQP\x00[\x00-\x02]")),
+    ("mqtt",          re.compile(rb"^\x10[\x00-\xff]{1,4}MQTT")),                  # CONNECT packet type 0x10 + protocol name
+    ("stomp",         re.compile(rb"^(CONNECT|STOMP)\n", re.MULTILINE)),
+    ("kafka",         re.compile(rb"^\x00\x00\x00[\x00-\xff]\x00[\x00-\x3f]\x00\x00")), # Kafka request header
+    # ── Directory / auth ───────────────────────────────────────────────────
+    ("smb",           re.compile(rb"\xffSMB|\xfeSMB")),
+    ("ldap",          re.compile(rb"^\x30[\x00-\xff]{1,3}\x02[\x01-\x04][\x00-\xff]\x60")),
+    ("kerberos",      re.compile(rb"^\x6a[\x00-\xff]{1,4}\x30")),                  # AS-REQ / KRB_AS_REQ
+    # ── Network infrastructure ─────────────────────────────────────────────
+    ("dns",           re.compile(rb"[\x00-\xff]{2}[\x81\x84][\x00\x80]")),
+    ("ntp",           re.compile(rb"^\x1b[\x00-\xff]{3}")),                        # NTP client request (LI=0, VN=3, mode=3)
+    ("bgp",           re.compile(rb"^\xff{16}")),                                  # BGP marker
+    ("snmp",          re.compile(rb"^\x30[\x00-\xff]{1,3}\x02\x01[\x00-\x03]\x04")), # SNMP community BER
+    ("tftp",          re.compile(rb"^\x00[\x01\x02]")),                            # TFTP RRQ/WRQ
+    ("nfs-rpc",       re.compile(rb"[\x00-\xff]{4}\x00\x00\x00\x00\x00\x00\x00\x02\x00\x01\x86\xa3")), # RPC CALL to NFS program
+    # ── Proxies / tunnels ──────────────────────────────────────────────────
+    ("telnet",        re.compile(rb"\xff[\xfb-\xfe].")),
+    ("socks4",        re.compile(rb"^\x04[\x01\x02]")),
+    ("socks5",        re.compile(rb"^\x05[\x01-\x09]")),
+    ("openvpn",       re.compile(rb"^\x00[\x00-\xff]\x38")),                       # OpenVPN control channel
+    ("wireguard",     re.compile(rb"^\x01\x00\x00\x00")),                          # WireGuard handshake initiation type=1
+    # ── Real-time / media ──────────────────────────────────────────────────
+    ("sip",           re.compile(rb"^(INVITE|REGISTER|OPTIONS|BYE|CANCEL|ACK|PRACK|SUBSCRIBE|NOTIFY|PUBLISH|REFER|MESSAGE|UPDATE)\s+sip", re.MULTILINE | re.IGNORECASE)),
+    ("sip-response",  re.compile(rb"^SIP/2\.0\s+\d{3}", re.MULTILINE)),
+    ("rtsp",          re.compile(rb"^(DESCRIBE|ANNOUNCE|SETUP|PLAY|PAUSE|RECORD|TEARDOWN|OPTIONS)\s+rtsp://", re.MULTILINE | re.IGNORECASE)),
+    ("rtmp",          re.compile(rb"^\x03[\x00]{3}")),                             # RTMP handshake C0+C1
+    # ── Dev / ops tooling ──────────────────────────────────────────────────
+    ("rsync",         re.compile(rb"^@RSYNCD:")),
+    ("git",           re.compile(rb"^(git-upload-pack|git-receive-pack|git-upload-archive)\s", re.MULTILINE)),
+    ("x11",           re.compile(rb"^[lB]\x00[\x0b\x00]{2}")),                    # X11 connection request byte-order flag
+    ("irc",           re.compile(rb"^(NICK|USER|JOIN|PRIVMSG|PASS|CAP)\s", re.MULTILINE)),
 ]
 
 # Known attack payload signatures — returns tag labels written to attack_tags column
