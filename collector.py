@@ -45,6 +45,20 @@ HASH_MD5_RE = re.compile(rb"\b[a-fA-F0-9]{32}\b")
 HASH_SHA1_RE = re.compile(rb"\b[a-fA-F0-9]{40}\b")
 HASH_SHA256_RE = re.compile(rb"\b[a-fA-F0-9]{64}\b")
 
+# HTTP request/response field extraction
+HTTP_REQUEST_RE = re.compile(
+    rb"^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT|TRACE)\s+(\S+)\s+(HTTP/[\d.]+)\r?\n",
+    re.MULTILINE | re.IGNORECASE,
+)
+HTTP_RESPONSE_RE = re.compile(
+    rb"^(HTTP/[\d.]+)\s+(\d{3})",
+    re.MULTILINE | re.IGNORECASE,
+)
+HTTP_HOST_RE = re.compile(rb"^Host:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECASE)
+HTTP_UA_RE = re.compile(rb"^User-Agent:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECASE)
+HTTP_REFERER_RE = re.compile(rb"^Referer:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECASE)
+HTTP_CONTENT_TYPE_RE = re.compile(rb"^Content-Type:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECASE)
+
 COMMON_ATTACK_PORTS = {
     21: "ftp",
     22: "ssh",
@@ -474,6 +488,14 @@ FIELDNAMES = [
     "asn_description",
     "whois_network",
     "attack_tags",
+    "http_method",
+    "http_uri",
+    "http_version",
+    "http_host",
+    "http_user_agent",
+    "http_referer",
+    "http_status_code",
+    "http_content_type",
 ]
 
 
@@ -577,7 +599,15 @@ class IntelCollector:
                     asn TEXT,
                     asn_description TEXT,
                     whois_network TEXT,
-                    attack_tags TEXT
+                    attack_tags TEXT,
+                    http_method TEXT,
+                    http_uri TEXT,
+                    http_version TEXT,
+                    http_host TEXT,
+                    http_user_agent TEXT,
+                    http_referer TEXT,
+                    http_status_code TEXT,
+                    http_content_type TEXT
                 )
                 """
             )
@@ -596,6 +626,19 @@ class IntelCollector:
             self.pg_cursor.execute(
                 f"ALTER TABLE {POSTGRES_TABLE} ADD COLUMN IF NOT EXISTS last_seen_utc TIMESTAMPTZ"
             )
+            for _col, _type in (
+                ("http_method", "TEXT"),
+                ("http_uri", "TEXT"),
+                ("http_version", "TEXT"),
+                ("http_host", "TEXT"),
+                ("http_user_agent", "TEXT"),
+                ("http_referer", "TEXT"),
+                ("http_status_code", "TEXT"),
+                ("http_content_type", "TEXT"),
+            ):
+                self.pg_cursor.execute(
+                    f"ALTER TABLE {POSTGRES_TABLE} ADD COLUMN IF NOT EXISTS {_col} {_type}"
+                )
             self.pg_cursor.execute(
                 f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{POSTGRES_TABLE}_event_key ON {POSTGRES_TABLE}(event_key)"
             )
@@ -713,7 +756,9 @@ class IntelCollector:
                     is_scan_like, ioc_ips, ioc_domains, ioc_urls, ioc_hashes,
                     ioc_cves, payload_sha256, payload_b64, rdns, is_private,
                     is_reserved, is_multicast, country, asn, asn_description,
-                    whois_network, attack_tags
+                    whois_network, attack_tags,
+                    http_method, http_uri, http_version, http_host,
+                    http_user_agent, http_referer, http_status_code, http_content_type
                 ) VALUES (
                     %(source_name)s, %(event_key)s, %(hit_count)s, %(timestamp_utc)s, %(last_seen_utc)s,
                     %(src_ip)s, %(dst_ip)s, %(src_port)s,
@@ -724,7 +769,9 @@ class IntelCollector:
                     %(payload_sha256)s, %(payload_b64)s, %(rdns)s,
                     %(is_private_bool)s, %(is_reserved_bool)s,
                     %(is_multicast_bool)s, %(country)s, %(asn)s,
-                    %(asn_description)s, %(whois_network)s, %(attack_tags)s
+                    %(asn_description)s, %(whois_network)s, %(attack_tags)s,
+                    %(http_method)s, %(http_uri)s, %(http_version)s, %(http_host)s,
+                    %(http_user_agent)s, %(http_referer)s, %(http_status_code)s, %(http_content_type)s
                 )
                 ON CONFLICT (event_key)
                 DO UPDATE SET
@@ -772,6 +819,41 @@ class IntelCollector:
             "ioc_cves": "|".join(cves),
             "ioc_hashes": "|".join(sorted(hashes)),
         }
+
+    def _extract_http_fields(self, payload: bytes) -> Dict[str, str]:
+        empty: Dict[str, str] = {
+            "http_method": "",
+            "http_uri": "",
+            "http_version": "",
+            "http_host": "",
+            "http_user_agent": "",
+            "http_referer": "",
+            "http_status_code": "",
+            "http_content_type": "",
+        }
+        if not payload:
+            return empty
+        result = dict(empty)
+        m = HTTP_REQUEST_RE.search(payload)
+        if m:
+            result["http_method"] = m.group(1).decode("utf-8", errors="ignore").upper()
+            result["http_uri"] = m.group(2).decode("utf-8", errors="ignore")[:512]
+            result["http_version"] = m.group(3).decode("utf-8", errors="ignore")
+        else:
+            m = HTTP_RESPONSE_RE.search(payload)
+            if m:
+                result["http_version"] = m.group(1).decode("utf-8", errors="ignore")
+                result["http_status_code"] = m.group(2).decode("utf-8", errors="ignore")
+        for field, regex in (
+            ("http_host", HTTP_HOST_RE),
+            ("http_user_agent", HTTP_UA_RE),
+            ("http_referer", HTTP_REFERER_RE),
+            ("http_content_type", HTTP_CONTENT_TYPE_RE),
+        ):
+            hm = regex.search(payload)
+            if hm:
+                result[field] = hm.group(1).decode("utf-8", errors="ignore")[:256]
+        return result
 
     def _safe_rdns(self, ip_str: str) -> str:
         if not ENABLE_RDNS:
@@ -885,6 +967,7 @@ class IntelCollector:
 
         src_ip_obj = ipaddress.ip_address(rec.src_ip)
         ioc_info = self._extract_iocs(rec.payload)
+        http_fields = self._extract_http_fields(rec.payload)
         rdns = self._safe_rdns(rec.src_ip)
         rdap = self._safe_rdap(rec.src_ip) if src_ip_obj.is_global else {
             "country": "",
@@ -931,6 +1014,7 @@ class IntelCollector:
             "attack_tags": attack_tags,
         }
         row.update(ioc_info)
+        row.update(http_fields)
 
         with self.lock:
             self._write_postgres(row)
