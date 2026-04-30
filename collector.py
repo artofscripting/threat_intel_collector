@@ -308,8 +308,16 @@ ATTACK_SIGNATURES: list[tuple[str, re.Pattern]] = [
         rb"(;|\|\||&&|\|)\s*(id|whoami|uname|ifconfig|ip\s+a|netstat|cat\s+/etc/passwd)\b",
         re.IGNORECASE,
     )),
-    ("cmd-substitution", re.compile(
-        rb"\$\([^)]{2,}\)|`[^`]{2,}`",
+    ("subst-recon", re.compile(
+        rb"(\$\(|`)\s*(id|whoami|uname(\s+-a)?|hostname|cat\s+/etc/(passwd|shadow|hosts)|ls\s+-[la]+|ps\s+(aux|ax|-ef)|netstat|ifconfig|ip\s+a(ddr)?)\b",
+        re.IGNORECASE,
+    )),
+    ("subst-download", re.compile(
+        rb"(\$\(|`)\s*(curl|wget|fetch|lwp-download|aria2c)\b[^`$)]*https?://",
+        re.IGNORECASE,
+    )),
+    ("subst-interpreter", re.compile(
+        rb"(\$\(|`)\s*(/(?:bin|usr/bin)/)?(?:bash|sh|dash|zsh|python3?|perl|ruby|php)\s+(?:-[ce]\s+)?['\"]",
         re.IGNORECASE,
     )),
     ("cmd-bash-sh", re.compile(
