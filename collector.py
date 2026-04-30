@@ -110,6 +110,9 @@ BANNER_FIRST_SERVICES = {
     "pop3",
     "imap",
     "telnet",
+    "rsync",
+    "mysql",
+    "postgres",
 }
 
 COMMON_ATTACK_PORTS = {
