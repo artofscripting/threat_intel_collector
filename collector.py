@@ -85,7 +85,159 @@ COMMON_ATTACK_PORTS = {
     9200: "elasticsearch",
     11211: "memcached",
     27017: "mongodb",
+    # Additional attack-relevant ports
+    88: "kerberos",
+    102: "s7comm",
+    502: "modbus",
+    636: "ldaps",
+    1883: "mqtt",
+    2181: "zookeeper",
+    2222: "ssh-alt",
+    3268: "ldap-gc",
+    3269: "ldaps-gc",
+    3690: "svn",
+    4369: "epmd",
+    4444: "meterpreter",
+    4505: "saltstack",
+    4506: "saltstack-ret",
+    4848: "glassfish",
+    5000: "docker-registry",
+    5984: "couchdb",
+    5985: "winrm",
+    5986: "winrm-https",
+    6000: "x11",
+    6443: "kubernetes-api",
+    6667: "irc",
+    7001: "weblogic",
+    7077: "spark-master",
+    7474: "neo4j",
+    8001: "kubernetes-proxy",
+    8009: "ajp13",
+    8083: "influxdb",
+    8086: "influxdb-api",
+    8088: "yarn-ui",
+    8140: "puppet",
+    8161: "activemq",
+    8888: "jupyter",
+    8883: "mqtt-ssl",
+    9000: "php-fpm",
+    9042: "cassandra",
+    9083: "hive-metastore",
+    9090: "prometheus",
+    9092: "kafka",
+    9300: "elasticsearch-transport",
+    10000: "hiveserver2",
+    10250: "kubelet",
+    10255: "kubelet-readonly",
+    15672: "rabbitmq-mgmt",
+    20000: "dnp3",
+    44818: "ethernetip",
+    50070: "hdfs-namenode",
 }
+
+# Application-layer banner signatures for service identification
+BANNER_SIGNATURES: list[tuple[str, re.Pattern]] = [
+    ("ssh",       re.compile(rb"^SSH-\d+\.\d+-", re.MULTILINE)),
+    ("http",      re.compile(rb"^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT)\s+\S+\s+HTTP/", re.MULTILINE)),
+    ("http",      re.compile(rb"^HTTP/[12]\.", re.MULTILINE)),
+    ("ftp",       re.compile(rb"^220[\s-].*ftp", re.MULTILINE | re.IGNORECASE)),
+    ("smtp",      re.compile(rb"^220[\s-].*smtp|^EHLO\b|^MAIL FROM:", re.MULTILINE | re.IGNORECASE)),
+    ("pop3",      re.compile(rb"^\+OK\s", re.MULTILINE)),
+    ("imap",      re.compile(rb"^\*\s+OK\s", re.MULTILINE)),
+    ("rdp",       re.compile(rb"^\x03\x00\x00")),
+    ("redis",     re.compile(rb"^\*\d+\r\n\$\d+\r\n", re.MULTILINE)),
+    ("mysql",     re.compile(rb"[\x00-\xff]{3}\x00\x0a[0-9]+\.")),
+    ("smb",       re.compile(rb"\xffSMB|\xfeSMB")),
+    ("telnet",    re.compile(rb"\xff[\xfb-\xfe].")),
+    ("sip",       re.compile(rb"^(INVITE|REGISTER|OPTIONS|BYE|CANCEL)\s+sip:", re.MULTILINE | re.IGNORECASE)),
+    ("memcached", re.compile(rb"^(get|set|delete|stats|version|flush_all)\s", re.MULTILINE)),
+    ("mongodb",   re.compile(rb"\xd4\x07\x00\x00|\xdc\x07\x00\x00")),
+    ("dns",       re.compile(rb"[\x00-\xff]{2}[\x81\x84][\x00\x80]")),
+    ("ldap",      re.compile(rb"^\x30[\x00-\xff]{1,3}\x02[\x01-\x04][\x00-\xff]\x60")),
+]
+
+# Known attack payload signatures — returns tag labels written to attack_tags column
+ATTACK_SIGNATURES: list[tuple[str, re.Pattern]] = [
+    # SQL injection
+    ("sqli",         re.compile(
+        rb"union\s+(all\s+)?select\b|'\s*(or|and)\s+'?\d'?\s*=\s*'?\d"
+        rb"|sleep\s*\(\s*\d|benchmark\s*\(|waitfor\s+delay|xp_cmdshell"
+        rb"|load_file\s*\(|into\s+outfile\b",
+        re.IGNORECASE,
+    )),
+    # Cross-site scripting
+    ("xss",          re.compile(
+        rb"<script[\s>]|javascript\s*:|on(error|load|click|mouseover)\s*=|<iframe[\s>]|alert\s*\(",
+        re.IGNORECASE,
+    )),
+    # OS command injection
+    ("cmdinject",    re.compile(
+        rb";\s*(id|whoami|uname|ls|cat)\b|[|&]\s*/bin/(sh|bash|dash|nc)\b|\$\([^)]{2,}\)|`[^`]{3,}`",
+        re.IGNORECASE,
+    )),
+    # Directory / path traversal
+    ("traversal",    re.compile(
+        rb"\.\./\.\./|\.\.[/\\](\.\.[/\\])+|%2e%2e%2f|%252e%252e%252f",
+        re.IGNORECASE,
+    )),
+    # SSRF targets
+    ("ssrf",         re.compile(
+        rb"169\.254\.169\.254|metadata\.google\.internal|file://|dict://|gopher://",
+        re.IGNORECASE,
+    )),
+    # Log4Shell (CVE-2021-44228)
+    ("log4shell",    re.compile(
+        rb"\$\{jndi\s*:|j\}n\}d\}i\}:|%24%7bjndi",
+        re.IGNORECASE,
+    )),
+    # Spring4Shell (CVE-2022-22965)
+    ("spring4shell", re.compile(
+        rb"class\.module\.classLoader|ClassLoader\.resources\.dirContext",
+        re.IGNORECASE,
+    )),
+    # Shellshock (CVE-2014-6271)
+    ("shellshock",   re.compile(rb"\(\)\s*\{\s*:;\s*\}", re.IGNORECASE)),
+    # PHP webshell / code execution
+    ("webshell",     re.compile(
+        rb"(system|exec|passthru|shell_exec)\s*\(|eval\s*\(\s*base64_decode\s*\(|cmd\.exe\s*/c",
+        re.IGNORECASE,
+    )),
+    # Mimikatz / credential dumping
+    ("mimikatz",     re.compile(
+        rb"sekurlsa::|lsadump::|privilege::debug|token::elevate|kerberos::(ptt|golden)",
+        re.IGNORECASE,
+    )),
+    # Scanner / exploitation tool fingerprints
+    ("scanner",      re.compile(
+        rb"\b(nmap|masscan|zgrab|nuclei|nikto|sqlmap|dirbuster|gobuster|wfuzz|hydra|medusa|metasploit)\b",
+        re.IGNORECASE,
+    )),
+    # XXE injection
+    ("xxe",          re.compile(
+        rb"<!ENTITY\s+\S+\s+SYSTEM\s+[\"']|<!DOCTYPE\s+\S+\s+\[",
+        re.IGNORECASE,
+    )),
+    # Server-side template injection
+    ("ssti",         re.compile(rb"\{\{[^}]+\}\}|\$\{[^}]+\}", re.IGNORECASE)),
+    # TLS Heartbeat / Heartbleed (ContentType=0x18)
+    ("heartbleed",   re.compile(rb"\x18\x03[\x00-\x03]")),
+    # Default / weak credential attempt patterns
+    ("weak-creds",   re.compile(
+        rb"\b(admin|root|test|guest|oracle|sa):(admin|password|123456|root|toor|pass|test|letmein|changeme)\b",
+        re.IGNORECASE,
+    )),
+    # HTTP CONNECT proxy abuse
+    ("proxy-abuse",  re.compile(rb"^CONNECT\s+\S+:\d+\s+HTTP/", re.IGNORECASE | re.MULTILINE)),
+    # PHP LFI / RFI
+    ("lfi-rfi",      re.compile(
+        rb"(include|require)(_once)?\s*\(\s*[\"'](https?://|php://|data:|zip://|phar://)",
+        re.IGNORECASE,
+    )),
+    # DNS zone transfer (AXFR — query type 252 in DNS wire format)
+    ("dns-axfr",     re.compile(rb"[\x00-\xff]{2}\x00\xfc")),
+    # ICS/SCADA Modbus function codes (read/write coils, holding registers)
+    ("modbus",       re.compile(rb"^\x00[\x00-\xff]\x00\x00[\x00-\xff]{2}[\x01-\x10]", re.MULTILINE)),
+]
 
 FIELDNAMES = [
     "timestamp_utc",
@@ -115,6 +267,7 @@ FIELDNAMES = [
     "asn",
     "asn_description",
     "whois_network",
+    "attack_tags",
 ]
 
 
@@ -200,12 +353,16 @@ class IntelCollector:
                     country TEXT,
                     asn TEXT,
                     asn_description TEXT,
-                    whois_network TEXT
+                    whois_network TEXT,
+                    attack_tags TEXT
                 )
                 """
             )
             self.pg_cursor.execute(
                 f"ALTER TABLE {POSTGRES_TABLE} ADD COLUMN IF NOT EXISTS source_name TEXT"
+            )
+            self.pg_cursor.execute(
+                f"ALTER TABLE {POSTGRES_TABLE} ADD COLUMN IF NOT EXISTS attack_tags TEXT"
             )
             print(
                 f"[*] PostgreSQL enabled, writing to table '{POSTGRES_TABLE}'",
@@ -289,7 +446,7 @@ class IntelCollector:
                     is_scan_like, ioc_ips, ioc_domains, ioc_urls, ioc_hashes,
                     ioc_cves, payload_sha256, payload_b64, rdns, is_private,
                     is_reserved, is_multicast, country, asn, asn_description,
-                    whois_network
+                    whois_network, attack_tags
                 ) VALUES (
                     %(source_name)s, %(timestamp_utc)s, %(src_ip)s, %(dst_ip)s, %(src_port)s,
                     %(dst_port)s, %(transport)s, %(ip_proto)s, %(packet_len)s,
@@ -299,7 +456,7 @@ class IntelCollector:
                     %(payload_sha256)s, %(payload_b64)s, %(rdns)s,
                     %(is_private_bool)s, %(is_reserved_bool)s,
                     %(is_multicast_bool)s, %(country)s, %(asn)s,
-                    %(asn_description)s, %(whois_network)s
+                    %(asn_description)s, %(whois_network)s, %(attack_tags)s
                 )
                 """,
                 {
@@ -378,13 +535,33 @@ class IntelCollector:
             self.rdap_cache[ip_str] = empty
             return empty
 
-    def _service_guess(self, dst_port: str) -> str:
-        if not dst_port:
+    def _service_guess(self, dst_port: str, src_port: str = "", payload: bytes = b"") -> str:
+        # 1. Application-layer banner/signature takes highest priority
+        if payload:
+            for svc, pat in BANNER_SIGNATURES:
+                if pat.search(payload):
+                    return svc
+        # 2. Fall back to well-known port lookup (dst first, then src)
+        for port_str in (dst_port, src_port):
+            if port_str:
+                try:
+                    svc = COMMON_ATTACK_PORTS.get(int(port_str))
+                    if svc:
+                        return svc
+                except ValueError:
+                    pass
+        return ""
+
+    def _detect_attack_type(self, payload: bytes) -> str:
+        """Return pipe-delimited set of matched attack tags, or empty string."""
+        if not payload:
             return ""
-        try:
-            return COMMON_ATTACK_PORTS.get(int(dst_port), "")
-        except ValueError:
-            return ""
+        tags = []
+        for label, pat in ATTACK_SIGNATURES:
+            if pat.search(payload):
+                if label not in tags:
+                    tags.append(label)
+        return "|".join(tags)
 
     def _is_scan_like(self, transport: str, tcp_flags: str, payload_len: int) -> str:
         # SYN-only packets with empty payload are often scan traffic.
@@ -422,7 +599,7 @@ class IntelCollector:
             "packet_len": rec.packet_len,
             "ttl_hoplimit": rec.ttl_hoplimit,
             "tcp_flags": rec.tcp_flags,
-            "service_guess": self._service_guess(rec.dst_port),
+            "service_guess": self._service_guess(rec.dst_port, rec.src_port, rec.payload),
             "is_scan_like": self._is_scan_like(rec.transport, rec.tcp_flags, len(rec.payload)),
             "payload_sha256": hashlib.sha256(rec.payload).hexdigest() if rec.payload else "",
             "payload_b64": "encrypted" if self._is_encrypted_payload(rec.payload) else (base64.b64encode(rec.payload).decode("ascii") if rec.payload else ""),
@@ -434,6 +611,7 @@ class IntelCollector:
             "asn": rdap["asn"],
             "asn_description": rdap["asn_description"],
             "whois_network": rdap["whois_network"],
+            "attack_tags": self._detect_attack_type(rec.payload),
         }
         row.update(ioc_info)
 
