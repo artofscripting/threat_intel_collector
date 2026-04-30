@@ -35,6 +35,7 @@ POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 SOURCE_NAME = os.getenv("SOURCE_NAME", "default")
 EXEMPT_IPS_FILE = os.getenv("EXEMPT_IPS_FILE", "/app/exempt_ips.txt")
+EXEMPT_ASNS_FILE = os.getenv("EXEMPT_ASNS_FILE", "/app/exempt_asn.txt")
 
 URL_RE = re.compile(rb"https?://[^\s\"'<>]+", re.IGNORECASE)
 IP_RE = re.compile(rb"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -409,6 +410,7 @@ class IntelCollector:
         self.pg_conn = None
         self.pg_cursor = None
         self._exempt_networks = self._load_exempt_networks()
+        self._exempt_asns = self._load_exempt_asns()
         self._self_ip = self._fetch_self_ip()
 
         if self._effective_postgres_dsn():
@@ -543,12 +545,43 @@ class IntelCollector:
         print(f"[*] Loaded {len(networks)} exempt network(s) from {EXEMPT_IPS_FILE}", flush=True)
         return networks
 
+    def _load_exempt_asns(self) -> set[str]:
+        asns: set[str] = set()
+        if not EXEMPT_ASNS_FILE or not os.path.isfile(EXEMPT_ASNS_FILE):
+            return asns
+
+        with open(EXEMPT_ASNS_FILE, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                normalized = line.upper()
+                if normalized.startswith("AS"):
+                    normalized = normalized[2:]
+
+                if normalized.isdigit():
+                    asns.add(normalized)
+                else:
+                    print(f"[!] Skipping invalid exempt ASN entry: {line!r}", flush=True)
+
+        print(f"[*] Loaded {len(asns)} exempt ASN(s) from {EXEMPT_ASNS_FILE}", flush=True)
+        return asns
+
     def _is_exempt(self, ip_str: str) -> bool:
         try:
             ip_obj = ipaddress.ip_address(ip_str)
         except ValueError:
             return False
         return any(ip_obj in net for net in self._exempt_networks)
+
+    def _is_exempt_asn(self, asn_value: str) -> bool:
+        if not asn_value:
+            return False
+        normalized = asn_value.upper().strip()
+        if normalized.startswith("AS"):
+            normalized = normalized[2:]
+        return normalized in self._exempt_asns
 
     def _is_local_ip(self, ip_str: str) -> bool:
         ip_obj = ipaddress.ip_address(ip_str)
@@ -715,6 +748,8 @@ class IntelCollector:
             "asn_description": "",
             "whois_network": "",
         }
+        if self._is_exempt_asn(rdap["asn"]):
+            return
 
         row = {
             "source_name": SOURCE_NAME,
