@@ -198,6 +198,74 @@ BANNER_SIGNATURES: list[tuple[str, re.Pattern]] = [
     ("git",           re.compile(rb"^(git-upload-pack|git-receive-pack|git-upload-archive)\s", re.MULTILINE)),
     ("x11",           re.compile(rb"^[lB]\x00[\x0b\x00]{2}")),                    # X11 connection request byte-order flag
     ("irc",           re.compile(rb"^(NICK|USER|JOIN|PRIVMSG|PASS|CAP)\s", re.MULTILINE)),
+    # ── Additional HTTP-over-* application layer ───────────────────────────
+    ("grpc",          re.compile(rb"content-type:\s*application/grpc", re.IGNORECASE)),
+    ("soap",          re.compile(rb"<(?:soapenv|soap-env|SOAP-ENV|s):Envelope", re.IGNORECASE)),
+    ("xmlrpc",        re.compile(rb"<methodCall>|<methodResponse>", re.IGNORECASE)),
+    ("graphql",       re.compile(rb"\b(query|mutation|subscription)\s+\w*\s*[\{(]", re.IGNORECASE)),
+    ("ssdp",          re.compile(rb"^(M-SEARCH|NOTIFY)\s+\*\s+HTTP", re.MULTILINE)),
+    ("wsman",         re.compile(rb"<wsman:|<wsa:Action|<wsmid:", re.IGNORECASE)),
+    ("prometheus",    re.compile(rb"^# (HELP|TYPE) \w+", re.MULTILINE)),
+    ("docker-api",    re.compile(rb"/(v\d+\.\d+/)?(containers|images|networks|volumes)/\w", re.IGNORECASE)),
+    ("kubernetes",    re.compile(rb"/api(?:s)?/[\w.]+/v\d+/(?:pods|nodes|services|deployments)/", re.IGNORECASE)),
+    # ── Mail / file transfer extras ────────────────────────────────────────
+    ("ftp",           re.compile(rb"^(USER|PASS|STOR|RETR|LIST|PASV|PORT|TYPE|QUIT|CWD|MKD|RMD|PWD|NLST|ABOR)\s", re.MULTILINE | re.IGNORECASE)),
+    ("smtp-starttls", re.compile(rb"^STARTTLS\r\n", re.MULTILINE | re.IGNORECASE)),
+    # ── Remote access extras ───────────────────────────────────────────────
+    ("citrix-ica",    re.compile(rb"\x7f\x7f\x49\x43\x41")),                      # Citrix ICA magic "ICA"
+    ("rlogin",        re.compile(rb"^\x00[^\x00]{1,16}\x00[^\x00]{1,16}\x00")),
+    # ── Proxy / tunnel extras ─────────────────────────────────────────────
+    ("l2tp",          re.compile(rb"^\x13\x00[\x00-\xff]{2}\x00\x00\x00\x00")),   # L2TP control, tunnel=0
+    ("pptp",          re.compile(rb"[\x00-\xff]{2}\x00\x00\x1a\x2b\x3c\x4d")),   # PPTP magic cookie
+    ("dtls",          re.compile(rb"^\x16\xfe[\xff\xfd\xfc]")),                   # DTLS 1.0/1.2/1.3 handshake
+    ("stun",          re.compile(rb"^[\x00\x01][\x00-\x03][\x00-\xff]{2}\x21\x12\xa4\x42")), # STUN magic cookie
+    # ── Key-value extras ──────────────────────────────────────────────────
+    ("redis",         re.compile(rb"^(\+OK|-ERR|\+PONG|-WRONGTYPE|-NOSCRIPT)", re.MULTILINE)),
+    ("memcached-bin", re.compile(rb"^\x80[\x00-\x1a][\x00-\xff]{2}\x00")),        # Memcached binary magic 0x80
+    # ── NoSQL / data platform extras ──────────────────────────────────────
+    ("elasticsearch", re.compile(rb"\"tagline\"\s*:\s*\"You Know, for Search\"", re.IGNORECASE)),
+    ("couchdb",       re.compile(rb"\"couchdb\"\s*:\s*\"Welcome\"", re.IGNORECASE)),
+    ("hadoop-ipc",    re.compile(rb"^hrpc\x09\x00")),                             # Hadoop IPC hello
+    # ── Messaging extras ──────────────────────────────────────────────────
+    ("nats",          re.compile(rb"^INFO \{\"server_id\"", re.MULTILINE)),        # NATS server greeting
+    ("zmtp",          re.compile(rb"^\xff[\x00-\xff]{8}\x7f")),                   # ZeroMQ ZMTP 3.0 greeting
+    ("activemq",      re.compile(rb"^ActiveMQ")),                                 # ActiveMQ broker banner
+    # ── Auth / identity extras ────────────────────────────────────────────
+    ("ntlm",          re.compile(rb"NTLMSSP\x00[\x01-\x03]")),                    # NTLM negotiate/challenge/auth
+    ("dcerpc",        re.compile(rb"^\x05\x00[\x0b\x00\x02\x0c\x0e\x10]")),      # DCERPC bind/request
+    ("radius",        re.compile(rb"^[\x01-\x0d][\x00-\xff]\x00[\x14-\xff]")),   # RADIUS code + min length
+    ("diameter",      re.compile(rb"^\x01[\x00-\xff]{3}[\x00\x40\x80\xc0][\x00-\xff]{5}")), # Diameter header
+    ("tacacs",        re.compile(rb"^\xc0[\x01\x02][\x01\x02\x03]")),             # TACACS+ version + type
+    # ── Network management extras ─────────────────────────────────────────
+    ("netflow",       re.compile(rb"^\x00[\x05\x09\x0a][\x00-\xff]{2}")),         # NetFlow v5/v9 / IPFIX
+    ("sflow",         re.compile(rb"^\x00\x00\x00\x05[\x00-\xff]{4}\x00\x00\x00")), # sFlow v5
+    ("ipmi-rmcp",     re.compile(rb"^\x06\x00\xff\x07")),                         # RMCP / IPMI over UDP
+    ("netconf",       re.compile(rb"urn:ietf:params:xml:ns:netconf", re.IGNORECASE)), # NETCONF XML
+    ("coap",          re.compile(rb"^[\x40-\x5f][\x01-\x05][\x00-\xff]{2}")),    # CoAP CON/NON request (ver=1, method 1-5)
+    # ── ICS / SCADA / OT ─────────────────────────────────────────────────
+    ("dnp3",          re.compile(rb"^\x05\x64")),                                  # DNP3 start bytes
+    ("s7comm",        re.compile(rb"^\x03\x00[\x00-\xff]{2}[\x00-\xff]{3}\x32")), # S7comm via TPKT + COTP + S7 PDU
+    ("bacnet",        re.compile(rb"^\x81[\x00-\x0b][\x00-\xff]{2}")),            # BACnet/IP BVLC header
+    ("iec104",        re.compile(rb"^\x68[\x04\x0e\x0f\x14\x15]")),               # IEC 60870-5-104 APCI
+    ("fins",          re.compile(rb"^FINS[\x00-\xff]{4}")),                       # Omron FINS/TCP header
+    ("ethernetip-cip",re.compile(rb"^\x65\x00[\x00-\xff]{2}\x00\x00\x00\x00")),  # EtherNet/IP ListServices
+    ("melsec",        re.compile(rb"^Q\x00[\x00-\xff]{2}\xff\x03\x00")),          # MELSEC-Q series PLC
+    # ── Healthcare / specialized verticals ────────────────────────────────
+    ("dicom",         re.compile(rb"^\x01\x00\x00\x00[\x00-\xff]{2}\x00\x00")),  # DICOM A-ASSOCIATE-RQ
+    ("hl7-mllp",      re.compile(rb"^\x0b[A-Z]{3}\|")),                          # HL7 MLLP VT + segment type
+    # ── Peer-to-peer / overlay ────────────────────────────────────────────
+    ("bittorrent",    re.compile(rb"^\x13BitTorrent protocol")),
+    ("bitcoin",       re.compile(rb"^\xf9\xbe\xb4\xd9")),                         # Bitcoin mainnet magic
+    ("gnutella",      re.compile(rb"^GNUTELLA (CONNECT|OK)/", re.MULTILINE)),
+    ("xmpp",          re.compile(rb"<stream:stream|xmlns=['\"]jabber", re.IGNORECASE)),
+    # ── Serialization / RPC frameworks ───────────────────────────────────
+    ("thrift",        re.compile(rb"^\x80\x01[\x00-\x02][\x00-\xff]")),           # Apache Thrift binary protocol
+    ("avro",          re.compile(rb"^Obj\x01")),                                  # Apache Avro container magic
+    ("erlang-dist",   re.compile(rb"^\x00[\x00-\xff]\x70[\x00-\xff]")),           # Erlang distribution challenge tag
+    # ── Storage / iSCSI ───────────────────────────────────────────────────
+    ("iscsi",         re.compile(rb"InitiatorName=iqn\.|TargetName=iqn\.", re.IGNORECASE)),
+    # ── Printer protocols ─────────────────────────────────────────────────
+    ("pjl",           re.compile(rb"^@PJL|\x1b%-12345X", re.MULTILINE | re.IGNORECASE)),
 ]
 
 # Known attack payload signatures — returns tag labels written to attack_tags column
