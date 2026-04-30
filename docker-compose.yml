@@ -1,0 +1,28 @@
+services:
+  threat-intel-listener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: threat-intel-listener
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    env_file:
+      - .env
+    environment:
+      INTERFACE: ${INTERFACE:-auto}
+      BPF_FILTER: ${BPF_FILTER:-}
+      ENABLE_RDNS: ${ENABLE_RDNS:-false}
+      ENABLE_RDAP: ${ENABLE_RDAP:-true}
+      PAYLOAD_MAX_BYTES: ${PAYLOAD_MAX_BYTES:-1024}
+      FLUSH_INTERVAL: ${FLUSH_INTERVAL:-1}
+      SOURCE_NAME: ${SOURCE_NAME:-honeypot-1}
+      POSTGRES_HOST: ${POSTGRES_HOST:-switchyard.proxy.rlwy.net}
+      POSTGRES_PORT: ${POSTGRES_PORT:-13718}
+      POSTGRES_DB: ${POSTGRES_DB:-railway}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${HONEY_POSTGRES_PASSWORD}
+      POSTGRES_TABLE: ${POSTGRES_TABLE:-threat_intel_events}
