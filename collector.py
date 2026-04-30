@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import ipaddress
+import math
 import os
 import re
 import signal
@@ -224,6 +225,24 @@ class IntelCollector:
     def _safe_bool(self, value: str) -> bool:
         return str(value).lower() == "true"
 
+    def _is_encrypted_payload(self, payload: bytes) -> bool:
+        if not payload or len(payload) < 8:
+            return False
+        # TLS/SSL handshake: ContentType=0x16, ProtocolVersion 0x03xx
+        if payload[0] == 0x16 and len(payload) > 2 and payload[1] == 0x03:
+            return True
+        # High Shannon entropy (>= 7.2 bits/byte) indicates encrypted or compressed data
+        counts = [0] * 256
+        for b in payload:
+            counts[b] += 1
+        length = len(payload)
+        entropy = 0.0
+        for c in counts:
+            if c:
+                p = c / length
+                entropy -= p * math.log2(p)
+        return entropy >= 7.2
+
     def _load_exempt_networks(self) -> list:
         networks = []
         if not EXEMPT_IPS_FILE or not os.path.isfile(EXEMPT_IPS_FILE):
@@ -406,7 +425,7 @@ class IntelCollector:
             "service_guess": self._service_guess(rec.dst_port),
             "is_scan_like": self._is_scan_like(rec.transport, rec.tcp_flags, len(rec.payload)),
             "payload_sha256": hashlib.sha256(rec.payload).hexdigest() if rec.payload else "",
-            "payload_b64": base64.b64encode(rec.payload).decode("ascii") if rec.payload else "",
+            "payload_b64": "encrypted" if self._is_encrypted_payload(rec.payload) else (base64.b64encode(rec.payload).decode("ascii") if rec.payload else ""),
             "rdns": rdns,
             "is_private": str(src_ip_obj.is_private).lower(),
             "is_reserved": str(src_ip_obj.is_reserved).lower(),
