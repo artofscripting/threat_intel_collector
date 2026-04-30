@@ -25,6 +25,7 @@ INTERFACE = os.getenv("INTERFACE", "auto")
 BPF_FILTER = os.getenv("BPF_FILTER", "")
 ENABLE_RDNS = os.getenv("ENABLE_RDNS", "false").lower() == "true"
 ENABLE_RDAP = os.getenv("ENABLE_RDAP", "true").lower() == "true"
+ENABLE_SOCKET_LISTENERS = os.getenv("ENABLE_SOCKET_LISTENERS", "true").lower() == "true"
 PAYLOAD_MAX_BYTES = int(os.getenv("PAYLOAD_MAX_BYTES", "1024"))
 FLUSH_INTERVAL = int(os.getenv("FLUSH_INTERVAL", "1"))
 POSTGRES_DSN = os.getenv("POSTGRES_DSN", "")
@@ -37,6 +38,10 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 SOURCE_NAME = os.getenv("SOURCE_NAME", "default")
 EXEMPT_IPS_FILE = os.getenv("EXEMPT_IPS_FILE", "/app/exempt_ips.txt")
 EXEMPT_ASNS_FILE = os.getenv("EXEMPT_ASNS_FILE", "/app/exempt_asn.txt")
+SOCKET_LISTENER_PORTS = os.getenv(
+    "SOCKET_LISTENER_PORTS",
+    "80,5000,5601,5984,8000,8001,8080,8083,8086,8088,8888,9000,9200",
+)
 
 URL_RE = re.compile(rb"https?://[^\s\"'<>]+", re.IGNORECASE)
 IP_RE = re.compile(rb"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -71,15 +76,29 @@ HTTP_200_RESPONSE = (
 SERVICE_BANNERS: dict[str, bytes] = {
     "ssh": b"SSH-2.0-OpenSSH_8.9p1 Debian-3\r\n",
     "ssh-alt": b"SSH-2.0-OpenSSH_8.9p1 Debian-3\r\n",
-    "ftp": b"220 Service ready\r\n",
+    "ftp": b"220 ProFTPD Server ready\r\n",
     "smtp": b"220 mail.local ESMTP ready\r\n",
+    "smtps": b"220 mail.local ESMTP ready\r\n",
     "submission": b"220 mail.local ESMTP ready\r\n",
     "pop3": b"+OK POP3 server ready\r\n",
+    "pop3s": b"+OK POP3 server ready\r\n",
     "imap": b"* OK IMAP4 ready\r\n",
+    "imaps": b"* OK IMAP4 ready\r\n",
     "telnet": b"Debian GNU/Linux 12\r\nlogin: ",
     "redis": b"-NOAUTH Authentication required.\r\n",
     "memcached": b"ERROR\r\n",
     "mongodb": b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+    "rsync": b"@RSYNCD: 31.0\n",
+    "mysql": b"\x4a\x00\x00\x00\x0a8.0.36\x00honeypot\x00mysql_native_password\x00",
+    "postgres": b"N\x00\x00\x00\x08S",
+    "docker": HTTP_200_RESPONSE,
+    "docker-registry": HTTP_200_RESPONSE,
+    "kibana": HTTP_200_RESPONSE,
+    "couchdb": HTTP_200_RESPONSE,
+    "elasticsearch": HTTP_200_RESPONSE,
+    "http": HTTP_200_RESPONSE,
+    "http-alt": HTTP_200_RESPONSE,
+    "jupyter": HTTP_200_RESPONSE,
 }
 
 BANNER_FIRST_SERVICES = {
@@ -555,6 +574,9 @@ class IntelCollector:
         self.rdns_cache: Dict[str, str] = {}
         self.rdap_cache: Dict[str, Dict[str, str]] = {}
         self._tcp_sessions: Dict[tuple[str, str, str, str], Dict[str, int | bool]] = {}
+        self._listener_sockets: list[socket.socket] = []
+        self._listener_threads: list[threading.Thread] = []
+        self._socket_listener_ports = self._parse_listener_ports(SOCKET_LISTENER_PORTS)
         self.pg_conn = None
         self.pg_cursor = None
         self._exempt_networks = self._load_exempt_networks()
@@ -687,6 +709,12 @@ class IntelCollector:
             self.pg_conn = None
 
     def close(self):
+        for listener in self._listener_sockets:
+            try:
+                listener.close()
+            except OSError:
+                pass
+        self._listener_sockets.clear()
         if self.pg_cursor is not None:
             self.pg_cursor.close()
         if self.pg_conn is not None:
@@ -694,6 +722,114 @@ class IntelCollector:
 
     def _safe_bool(self, value: str) -> bool:
         return str(value).lower() == "true"
+
+    def _parse_listener_ports(self, raw_ports: str) -> set[int]:
+        ports: set[int] = set()
+        for raw_port in raw_ports.split(","):
+            value = raw_port.strip()
+            if not value:
+                continue
+            try:
+                port = int(value)
+            except ValueError:
+                print(f"[!] Skipping invalid listener port: {value!r}", flush=True)
+                continue
+            if 1 <= port <= 65535:
+                ports.add(port)
+            else:
+                print(f"[!] Skipping out-of-range listener port: {value!r}", flush=True)
+        return ports
+
+    def _socket_managed_service(self, port: int) -> str:
+        return COMMON_ATTACK_PORTS.get(port, "")
+
+    def _http_listener_response(self, service_name: str) -> bytes:
+        body = b""
+        if service_name == "docker":
+            body = b"{\"message\":\"Docker API\"}"
+        elif service_name == "docker-registry":
+            body = b"{}"
+        elif service_name == "elasticsearch":
+            body = b'{"name":"node-1","cluster_name":"elasticsearch","tagline":"You Know, for Search"}'
+        elif service_name == "couchdb":
+            body = b'{"couchdb":"Welcome","version":"3.3.3"}'
+        elif service_name == "kibana":
+            body = b'{"status":"green"}'
+        headers = [
+            b"HTTP/1.1 200 OK",
+            b"Content-Type: text/html; charset=utf-8",
+            f"Content-Length: {len(body)}".encode("ascii"),
+            b"Connection: close",
+            b"",
+            body,
+        ]
+        return b"\r\n".join(headers)
+
+    def _handle_socket_client(self, client: socket.socket, addr, port: int, stop_event: threading.Event):
+        _ = addr
+        service_name = self._socket_managed_service(port)
+        try:
+            client.settimeout(2.0)
+            request_data = b""
+            try:
+                request_data = client.recv(PAYLOAD_MAX_BYTES)
+            except socket.timeout:
+                request_data = b""
+            if service_name in {"http", "http-alt", "docker", "docker-registry", "kibana", "couchdb", "elasticsearch", "jupyter"}:
+                client.sendall(self._http_listener_response(service_name))
+            else:
+                if request_data and HTTP_REQUEST_RE.search(request_data):
+                    client.sendall(HTTP_200_RESPONSE)
+                else:
+                    client.sendall(HTTP_200_RESPONSE)
+        except OSError:
+            if not stop_event.is_set():
+                pass
+        finally:
+            try:
+                client.close()
+            except OSError:
+                pass
+
+    def _serve_socket_listener(self, listener: socket.socket, port: int, stop_event: threading.Event):
+        while not stop_event.is_set():
+            try:
+                client, addr = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            worker = threading.Thread(
+                target=self._handle_socket_client,
+                args=(client, addr, port, stop_event),
+                daemon=True,
+            )
+            worker.start()
+
+    def start_socket_listeners(self, stop_event: threading.Event):
+        if not ENABLE_SOCKET_LISTENERS:
+            return
+        for port in sorted(self._socket_listener_ports):
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.settimeout(1.0)
+            try:
+                listener.bind(("0.0.0.0", port))
+                listener.listen(128)
+            except OSError as exc:
+                print(f"[!] Could not bind socket listener on port {port}: {exc}", flush=True)
+                listener.close()
+                continue
+            self._listener_sockets.append(listener)
+            thread = threading.Thread(
+                target=self._serve_socket_listener,
+                args=(listener, port, stop_event),
+                daemon=True,
+            )
+            thread.start()
+            self._listener_threads.append(thread)
+            service_name = self._socket_managed_service(port) or "http"
+            print(f"[*] Socket listener active on port {port} ({service_name})", flush=True)
 
     def _is_encrypted_payload(self, payload: bytes) -> bool:
         if not payload or len(payload) < 8:
@@ -793,6 +929,61 @@ class IntelCollector:
         normalized = service_guess or ""
         if HTTP_REQUEST_RE.search(payload):
             return HTTP_200_RESPONSE
+        upper_payload = payload.upper()
+        if normalized == "ftp":
+            if upper_payload.startswith(b"USER "):
+                return b"331 Password required\r\n"
+            if upper_payload.startswith(b"PASS "):
+                return b"530 Login incorrect\r\n"
+            if upper_payload.startswith(b"SYST"):
+                return b"215 UNIX Type: L8\r\n"
+            if upper_payload.startswith(b"QUIT"):
+                return b"221 Goodbye\r\n"
+        if normalized in {"smtp", "submission", "smtps"}:
+            if upper_payload.startswith((b"EHLO", b"HELO")):
+                return b"250-mail.local\r\n250-PIPELINING\r\n250 SIZE 52428800\r\n"
+            if upper_payload.startswith(b"MAIL FROM:"):
+                return b"250 2.1.0 Ok\r\n"
+            if upper_payload.startswith(b"RCPT TO:"):
+                return b"250 2.1.5 Ok\r\n"
+            if upper_payload.startswith(b"DATA"):
+                return b"354 End data with <CR><LF>.<CR><LF>\r\n"
+            if upper_payload.startswith(b"QUIT"):
+                return b"221 2.0.0 Bye\r\n"
+        if normalized in {"pop3", "pop3s"}:
+            if upper_payload.startswith(b"USER "):
+                return b"+OK User accepted\r\n"
+            if upper_payload.startswith(b"PASS "):
+                return b"-ERR Authentication failed\r\n"
+            if upper_payload.startswith(b"STAT"):
+                return b"+OK 0 0\r\n"
+            if upper_payload.startswith(b"QUIT"):
+                return b"+OK Goodbye\r\n"
+        if normalized in {"imap", "imaps"}:
+            tag = payload.split(b" ", 1)[0] if payload else b"*"
+            if b"CAPABILITY" in upper_payload:
+                return b"* CAPABILITY IMAP4rev1 STARTTLS AUTH=PLAIN\r\n" + tag + b" OK CAPABILITY completed\r\n"
+            if b"LOGIN" in upper_payload:
+                return tag + b" NO LOGIN failed\r\n"
+            if b"LOGOUT" in upper_payload:
+                return b"* BYE Logging out\r\n" + tag + b" OK LOGOUT completed\r\n"
+        if normalized == "redis":
+            if upper_payload.startswith(b"*1\r\n$4\r\nPING") or upper_payload.startswith(b"PING"):
+                return b"+PONG\r\n"
+            if upper_payload.startswith(b"INFO"):
+                info = b"# Server\r\nredis_version:7.0.0\r\n"
+                return b"$" + str(len(info)).encode("ascii") + b"\r\n" + info + b"\r\n"
+            if upper_payload.startswith(b"QUIT"):
+                return b"+OK\r\n"
+        if normalized == "memcached":
+            if upper_payload.startswith(b"VERSION"):
+                return b"VERSION 1.6.21\r\n"
+            if upper_payload.startswith(b"STATS"):
+                return b"STAT pid 1\r\nSTAT uptime 3600\r\nEND\r\n"
+            if upper_payload.startswith(b"QUIT"):
+                return b""
+        if normalized == "rsync":
+            return b"@RSYNCD: 31.0\n"
         banner = SERVICE_BANNERS.get(normalized)
         if banner:
             return banner
@@ -806,6 +997,12 @@ class IntelCollector:
         if self._self_ip and rec.src_ip == self._self_ip:
             return
         if self._is_exempt(rec.src_ip) or self._is_exempt(rec.dst_ip):
+            return
+        try:
+            dst_port_value = int(rec.dst_port)
+        except ValueError:
+            return
+        if dst_port_value in self._socket_listener_ports:
             return
 
         tcp_layer = pkt[TCP]
@@ -1236,6 +1433,7 @@ def main():
         raise RuntimeError("No sniffable network interfaces found")
 
     selected_interface = choose_interface(INTERFACE)
+    collector.start_socket_listeners(stopped)
 
     def handle_signal(signum, frame):
         _ = (signum, frame)
