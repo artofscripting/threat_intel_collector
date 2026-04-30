@@ -273,85 +273,165 @@ BANNER_SIGNATURES: list[tuple[str, re.Pattern]] = [
 
 # Known attack payload signatures — returns tag labels written to attack_tags column
 ATTACK_SIGNATURES: list[tuple[str, re.Pattern]] = [
-    # SQL injection
-    ("sqli",         re.compile(
-        rb"union\s+(all\s+)?select\b|'\s*(or|and)\s+'?\d'?\s*=\s*'?\d"
-        rb"|sleep\s*\(\s*\d|benchmark\s*\(|waitfor\s+delay|xp_cmdshell"
-        rb"|load_file\s*\(|into\s+outfile\b",
+    # SQLi families
+    ("sqli-union", re.compile(
+        rb"union\s+(all\s+)?select\b|group\s+by\s+\d+\s+having\s+\d=\d",
         re.IGNORECASE,
     )),
-    # Cross-site scripting
-    ("xss",          re.compile(
-        rb"<script[\s>]|javascript\s*:|on(error|load|click|mouseover)\s*=|<iframe[\s>]|alert\s*\(",
+    ("sqli-boolean", re.compile(
+        rb"'\s*(or|and)\s+'?\d'?\s*=\s*'?\d|\bor\b\s+1=1\b|\band\b\s+1=1\b",
         re.IGNORECASE,
     )),
-    # OS command injection
-    ("cmdinject",    re.compile(
-        rb";\s*(id|whoami|uname|ls|cat)\b|[|&]\s*/bin/(sh|bash|dash|nc)\b|\$\([^)]{2,}\)|`[^`]{3,}`",
+    ("sqli-time", re.compile(
+        rb"sleep\s*\(\s*\d|benchmark\s*\(|waitfor\s+delay|pg_sleep\s*\(",
         re.IGNORECASE,
     )),
-    # Directory / path traversal
-    ("traversal",    re.compile(
-        rb"\.\./\.\./|\.\.[/\\](\.\.[/\\])+|%2e%2e%2f|%252e%252e%252f",
+    ("sqli-file-write", re.compile(
+        rb"into\s+outfile\b|load_file\s*\(|copy\s*\(\s*select.+to\s+program",
         re.IGNORECASE,
     )),
-    # SSRF targets
-    ("ssrf",         re.compile(
-        rb"169\.254\.169\.254|metadata\.google\.internal|file://|dict://|gopher://",
+    # XSS families
+    ("xss-script", re.compile(
+        rb"<script[\s>]|</script>|<iframe[\s>]",
         re.IGNORECASE,
     )),
-    # Log4Shell (CVE-2021-44228)
-    ("log4shell",    re.compile(
-        rb"\$\{jndi\s*:|j\}n\}d\}i\}:|%24%7bjndi",
+    ("xss-event", re.compile(
+        rb"on(error|load|click|mouseover|focus|mouseenter|submit)\s*=",
         re.IGNORECASE,
     )),
-    # Spring4Shell (CVE-2022-22965)
+    ("xss-js-uri", re.compile(
+        rb"javascript\s*:|data\s*:\s*text/html|vbscript\s*:",
+        re.IGNORECASE,
+    )),
+    # Command injection split into detailed tags
+    ("cmd-separator", re.compile(
+        rb"(;|\|\||&&|\|)\s*(id|whoami|uname|ifconfig|ip\s+a|netstat|cat\s+/etc/passwd)\b",
+        re.IGNORECASE,
+    )),
+    ("cmd-substitution", re.compile(
+        rb"\$\([^)]{2,}\)|`[^`]{2,}`",
+        re.IGNORECASE,
+    )),
+    ("cmd-bash-sh", re.compile(
+        rb"\b(/bin/)?(bash|sh|dash|zsh)\b\s*(-c\s+)?",
+        re.IGNORECASE,
+    )),
+    ("cmd-powershell", re.compile(
+        rb"\bpowershell(\.exe)?\b|\bpwsh\b|-enc(odedcommand)?\b|frombase64string\(",
+        re.IGNORECASE,
+    )),
+    ("cmd-windows", re.compile(
+        rb"\bcmd\.exe\s*/c\b|\bwmic\b|\brundll32\b|\bregsvr32\b|\bmshta\b|\bbitsadmin\b",
+        re.IGNORECASE,
+    )),
+    ("cmd-reverse-shell", re.compile(
+        rb"bash\s+-i\s+>&\s*/dev/tcp/|nc\s+-e\s+/bin/(sh|bash)|python\s+-c\s+['\"][^'\"]*socket",
+        re.IGNORECASE,
+    )),
+    ("cmd-downloader", re.compile(
+        rb"\b(curl|wget|certutil|invoke-webrequest|invoke-expression|iex)\b.+(http|https)://",
+        re.IGNORECASE,
+    )),
+    ("cmd-recon", re.compile(
+        rb"\b(id|whoami|uname\s+-a|hostname|cat\s+/etc/(passwd|shadow)|ls\s+-la)\b",
+        re.IGNORECASE,
+    )),
+    # Path traversal and file abuse
+    ("traversal", re.compile(
+        rb"\.\./\.\./|\.\.[/\\](\.\.[/\\])+|%2e%2e%2f|%252e%252e%252f|%c0%ae%c0%ae",
+        re.IGNORECASE,
+    )),
+    ("lfi", re.compile(
+        rb"/(etc/passwd|etc/shadow|proc/self/environ|windows/win\.ini)|php://filter",
+        re.IGNORECASE,
+    )),
+    ("rfi", re.compile(
+        rb"(include|require)(_once)?\s*\(\s*[\"']https?://|\bauto_prepend_file\s*=\s*https?://",
+        re.IGNORECASE,
+    )),
+    # SSRF and cloud metadata hits
+    ("ssrf", re.compile(
+        rb"169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200|latest/meta-data",
+        re.IGNORECASE,
+    )),
+    ("ssrf-scheme", re.compile(
+        rb"file://|dict://|gopher://|ftp://127\.0\.0\.1|http://(127\.0\.0\.1|localhost)",
+        re.IGNORECASE,
+    )),
+    # Deserialization and template attacks
+    ("ssti", re.compile(rb"\{\{[^}]+\}\}|\$\{[^}]+\}", re.IGNORECASE)),
+    ("deserialization-java", re.compile(
+        rb"rO0AB|java\.io\.ObjectInputStream|ysoserial|CommonsCollections",
+        re.IGNORECASE,
+    )),
+    ("deserialization-dotnet", re.compile(
+        rb"System\.Runtime\.Serialization|BinaryFormatter|LosFormatter|__VIEWSTATE",
+        re.IGNORECASE,
+    )),
+    # Known exploit families
+    ("log4shell", re.compile(
+        rb"\$\{jndi\s*:|%24%7Bjndi|\$\{\$\{::-j\}\$\{::-n\}\$\{::-d\}\$\{::-i\}",
+        re.IGNORECASE,
+    )),
     ("spring4shell", re.compile(
         rb"class\.module\.classLoader|ClassLoader\.resources\.dirContext",
         re.IGNORECASE,
     )),
-    # Shellshock (CVE-2014-6271)
-    ("shellshock",   re.compile(rb"\(\)\s*\{\s*:;\s*\}", re.IGNORECASE)),
-    # PHP webshell / code execution
-    ("webshell",     re.compile(
-        rb"(system|exec|passthru|shell_exec)\s*\(|eval\s*\(\s*base64_decode\s*\(|cmd\.exe\s*/c",
-        re.IGNORECASE,
-    )),
-    # Mimikatz / credential dumping
-    ("mimikatz",     re.compile(
-        rb"sekurlsa::|lsadump::|privilege::debug|token::elevate|kerberos::(ptt|golden)",
-        re.IGNORECASE,
-    )),
-    # Scanner / exploitation tool fingerprints
-    ("scanner",      re.compile(
-        rb"\b(nmap|masscan|zgrab|nuclei|nikto|sqlmap|dirbuster|gobuster|wfuzz|hydra|medusa|metasploit)\b",
-        re.IGNORECASE,
-    )),
-    # XXE injection
-    ("xxe",          re.compile(
+    ("shellshock", re.compile(rb"\(\)\s*\{\s*:;\s*\}", re.IGNORECASE)),
+    ("proxy-abuse", re.compile(rb"^CONNECT\s+\S+:\d+\s+HTTP/", re.IGNORECASE | re.MULTILINE)),
+    ("xxe", re.compile(
         rb"<!ENTITY\s+\S+\s+SYSTEM\s+[\"']|<!DOCTYPE\s+\S+\s+\[",
         re.IGNORECASE,
     )),
-    # Server-side template injection
-    ("ssti",         re.compile(rb"\{\{[^}]+\}\}|\$\{[^}]+\}", re.IGNORECASE)),
-    # TLS Heartbeat / Heartbleed (ContentType=0x18)
-    ("heartbleed",   re.compile(rb"\x18\x03[\x00-\x03]")),
-    # Default / weak credential attempt patterns
-    ("weak-creds",   re.compile(
+    # Credential access and brute force indicators
+    ("weak-creds", re.compile(
         rb"\b(admin|root|test|guest|oracle|sa):(admin|password|123456|root|toor|pass|test|letmein|changeme)\b",
         re.IGNORECASE,
     )),
-    # HTTP CONNECT proxy abuse
-    ("proxy-abuse",  re.compile(rb"^CONNECT\s+\S+:\d+\s+HTTP/", re.IGNORECASE | re.MULTILINE)),
-    # PHP LFI / RFI
-    ("lfi-rfi",      re.compile(
-        rb"(include|require)(_once)?\s*\(\s*[\"'](https?://|php://|data:|zip://|phar://)",
+    ("password-spray", re.compile(
+        rb"(invalid\s+password|login\s+failed|authentication\s+failed).*(admin|root|user|guest)",
         re.IGNORECASE,
     )),
-    # DNS zone transfer (AXFR — query type 252 in DNS wire format)
-    ("dns-axfr",     re.compile(rb"[\x00-\xff]{2}\x00\xfc")),
-    # ICS/SCADA Modbus function codes (read/write coils, holding registers)
-    ("modbus",       re.compile(rb"^\x00[\x00-\xff]\x00\x00[\x00-\xff]{2}[\x01-\x10]", re.MULTILINE)),
+    ("mimikatz", re.compile(
+        rb"sekurlsa::|lsadump::|privilege::debug|token::elevate|kerberos::(ptt|golden)",
+        re.IGNORECASE,
+    )),
+    # Recon/scanner/tool marks
+    ("scanner", re.compile(
+        rb"\b(nmap|masscan|zgrab|nuclei|nikto|sqlmap|dirbuster|gobuster|wfuzz|hydra|medusa|metasploit|amass|whatweb)\b",
+        re.IGNORECASE,
+    )),
+    ("user-agent-scanner", re.compile(
+        rb"user-agent\s*:\s*(sqlmap|nmap|masscan|nikto|acunetix|nessus)",
+        re.IGNORECASE,
+    )),
+    # DoS / DDoS signatures
+    ("dos-http-flood", re.compile(
+        rb"(GET|POST)\s+/\S*\s+HTTP/1\.[01]\r\n(?:[^\r\n]+\r\n){20,}",
+        re.IGNORECASE,
+    )),
+    ("dos-syn-flood", re.compile(rb"\x02$")),
+    ("dos-udp-amplification", re.compile(
+        rb"\x00\x00\x00\x00\x00\x01\x00\x00|\x17\x00\x03\x2a|\x01\x00\x00\x01\x00\x00",
+        re.IGNORECASE,
+    )),
+    # Protocol abuse and OT
+    ("dns-axfr", re.compile(rb"[\x00-\xff]{2}\x00\xfc")),
+    ("heartbleed", re.compile(rb"\x18\x03[\x00-\x03]")),
+    ("modbus", re.compile(rb"^\x00[\x00-\xff]\x00\x00[\x00-\xff]{2}[\x01-\x10]", re.MULTILINE)),
+    ("smb-exec", re.compile(
+        rb"(psexec|wmiexec|smbexec|\\\\.*\\ADMIN\$)",
+        re.IGNORECASE,
+    )),
+    # Webshell / staged payload markers
+    ("webshell", re.compile(
+        rb"(system|exec|passthru|shell_exec)\s*\(|eval\s*\(\s*base64_decode\s*\(|assert\s*\(\s*\$_(POST|GET)",
+        re.IGNORECASE,
+    )),
+    ("webshell-china-chopper", re.compile(
+        rb"\bpass\s*=\s*\"[a-z0-9]{3,8}\".*(eval|assert)\s*\(",
+        re.IGNORECASE,
+    )),
 ]
 
 FIELDNAMES = [
