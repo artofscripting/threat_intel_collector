@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import ipaddress
+import json
 import math
 import os
 import re
@@ -8,6 +9,7 @@ import signal
 import socket
 import sys
 import threading
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Optional
@@ -407,9 +409,22 @@ class IntelCollector:
         self.pg_conn = None
         self.pg_cursor = None
         self._exempt_networks = self._load_exempt_networks()
+        self._self_ip = self._fetch_self_ip()
 
         if self._effective_postgres_dsn():
             self._init_postgres()
+
+    def _fetch_self_ip(self) -> str:
+        """Fetch this host's public IP via ipify and return it as a string."""
+        try:
+            with urllib.request.urlopen("https://api.ipify.org?format=json", timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                ip = data["ip"]
+                print(f"[*] Self public IP: {ip} (outgoing packets from this IP will be ignored)", flush=True)
+                return ip
+        except Exception as exc:
+            print(f"[!] Could not fetch self IP from ipify: {exc} — outgoing-packet filter disabled", flush=True)
+            return ""
 
     def _effective_postgres_dsn(self) -> str:
         if POSTGRES_DSN:
@@ -686,6 +701,8 @@ class IntelCollector:
     def write_record(self, rec: IntelRecord):
         if self._is_local_ip(rec.src_ip) or self._is_local_ip(rec.dst_ip):
             return
+        if self._self_ip and rec.src_ip == self._self_ip:
+            return  # outgoing packet from this host — ignore
         if self._is_exempt(rec.src_ip) or self._is_exempt(rec.dst_ip):
             return
 
