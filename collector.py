@@ -65,6 +65,8 @@ HTTP_UA_RE = re.compile(rb"^User-Agent:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECA
 HTTP_REFERER_RE = re.compile(rb"^Referer:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECASE)
 HTTP_CONTENT_TYPE_RE = re.compile(rb"^Content-Type:\s*(.+?)\r?$", re.MULTILINE | re.IGNORECASE)
 
+BASE64_TEXT_RE = re.compile(rb"^[A-Za-z0-9+/=_-]+$")
+
 HTTP_200_RESPONSE = (
     b"HTTP/1.1 200 OK\r\n"
     b"Content-Type: text/html; charset=utf-8\r\n"
@@ -854,8 +856,8 @@ class IntelCollector:
     def _is_encrypted_payload(self, payload: bytes) -> bool:
         if not payload or len(payload) < 8:
             return False
-        # TLS/SSL handshake: ContentType=0x16, ProtocolVersion 0x03xx
-        if payload[0] == 0x16 and len(payload) > 2 and payload[1] == 0x03:
+        # TLS application data records (type 0x17) are encrypted by design.
+        if payload[0] == 0x17 and len(payload) > 2 and payload[1] == 0x03:
             return True
         # High Shannon entropy (>= 7.2 bits/byte) indicates encrypted or compressed data
         counts = [0] * 256
@@ -868,6 +870,101 @@ class IntelCollector:
                 p = c / length
                 entropy -= p * math.log2(p)
         return entropy >= 7.2
+
+    def _printable_ratio(self, payload: bytes) -> float:
+        if not payload:
+            return 0.0
+        printable = 0
+        for b in payload:
+            if b in (9, 10, 13) or 32 <= b <= 126:
+                printable += 1
+        return printable / len(payload)
+
+    def _try_base64_decode(self, payload: bytes) -> Optional[bytes]:
+        cleaned = b"".join(payload.split())
+        if len(cleaned) < 16:
+            return None
+        if not BASE64_TEXT_RE.match(cleaned):
+            return None
+
+        for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                padded = cleaned + (b"=" * ((4 - (len(cleaned) % 4)) % 4))
+                decoded = decoder(padded)
+            except Exception:
+                continue
+            if not decoded:
+                continue
+            if self._printable_ratio(decoded) >= 0.70:
+                return decoded
+            upper = decoded.upper()
+            if any(
+                marker in upper
+                for marker in (
+                    b"HTTP/",
+                    b"GET ",
+                    b"POST ",
+                    b"HOST:",
+                    b"USER-AGENT:",
+                    b"SELECT ",
+                    b"UNION ",
+                    b"SSH-",
+                )
+            ):
+                return decoded
+        return None
+
+    def _try_summarize_tls(self, payload: bytes) -> Optional[bytes]:
+        if len(payload) < 5:
+            return None
+        content_type = payload[0]
+        major = payload[1]
+        minor = payload[2]
+        if major != 0x03:
+            return None
+
+        record_len = int.from_bytes(payload[3:5], "big")
+        if content_type == 0x16 and len(payload) >= 6:
+            handshake_type = payload[5]
+            handshake_name = {
+                1: "client_hello",
+                2: "server_hello",
+                11: "certificate",
+                12: "server_key_exchange",
+                13: "certificate_request",
+                14: "server_hello_done",
+                16: "client_key_exchange",
+                20: "finished",
+            }.get(handshake_type, "unknown")
+            summary = (
+                f"TLS_HANDSHAKE type={handshake_name} version=0x{major:02x}{minor:02x} len={record_len}"
+            )
+            return summary.encode("utf-8", errors="ignore")
+        if content_type == 0x14:
+            summary = f"TLS_CHANGE_CIPHER_SPEC version=0x{major:02x}{minor:02x} len={record_len}"
+            return summary.encode("utf-8", errors="ignore")
+        if content_type == 0x15:
+            summary = f"TLS_ALERT version=0x{major:02x}{minor:02x} len={record_len}"
+            return summary.encode("utf-8", errors="ignore")
+        return None
+
+    def _payload_for_storage(self, payload: bytes) -> str:
+        if not payload:
+            return ""
+
+        candidates = [payload]
+        b64_decoded = self._try_base64_decode(payload)
+        if b64_decoded is not None:
+            candidates.insert(0, b64_decoded)
+
+        for candidate in candidates:
+            tls_summary = self._try_summarize_tls(candidate)
+            if tls_summary is not None:
+                return base64.b64encode(tls_summary).decode("ascii")
+            if not self._is_encrypted_payload(candidate):
+                return base64.b64encode(candidate).decode("ascii")
+
+        return "encrypted"
 
     def _load_exempt_networks(self) -> list:
         networks = []
@@ -1369,7 +1466,7 @@ class IntelCollector:
             "service_guess": service_guess,
             "is_scan_like": self._is_scan_like(rec.transport, rec.tcp_flags, len(rec.payload)),
             "payload_sha256": payload_sha256,
-            "payload_b64": "encrypted" if self._is_encrypted_payload(rec.payload) else (base64.b64encode(rec.payload).decode("ascii") if rec.payload else ""),
+            "payload_b64": self._payload_for_storage(rec.payload),
             "rdns": rdns,
             "is_private": str(src_ip_obj.is_private).lower(),
             "is_reserved": str(src_ip_obj.is_reserved).lower(),
